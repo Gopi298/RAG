@@ -1,11 +1,10 @@
 # ============================================================
 # PDF + CSV RAG QUESTION ANSWERING APPLICATION
-# Streamlit + LangChain + Chroma + Ollama
+# Streamlit + LangChain + Chroma + DeepSeek
 # ============================================================
 
 import os
 import tempfile
-import shutil
 
 import streamlit as st
 
@@ -14,14 +13,13 @@ from langchain_community.document_loaders import (
     CSVLoader
 )
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    RecursiveCharacterTextSplitter
+)
 
 from langchain_chroma import Chroma
 
-from langchain_ollama import (
-    OllamaEmbeddings,
-    OllamaLLM
-)
+from langchain_openai import ChatOpenAI
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -45,30 +43,59 @@ st.set_page_config(
 # PAGE TITLE
 # ============================================================
 
-st.title("📚 PDF & CSV Question-Answering RAG App")
+st.title("📚 PDF & CSV Question-Answering RAG")
 
 st.write(
-    "Upload a PDF or CSV file and ask questions based on its content."
+    "Upload a PDF or CSV file and ask questions based on "
+    "the uploaded document."
 )
 
 
 # ============================================================
-# OLLAMA CONFIGURATION
+# DEEPSEEK CONFIGURATION
 # ============================================================
 
-EMBEDDING_MODEL = "nomic-embed-text"
-LLM_MODEL = "llama3.1"
+DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+
+DEEPSEEK_BASE_URL = st.secrets.get(
+    "DEEPSEEK_BASE_URL",
+    "https://api.deepseek.com"
+)
+
+DEEPSEEK_MODEL = "DeepSeek-V4-Flash-0731-bucket"
 
 
 # ============================================================
-# CREATE EMBEDDINGS
+# EMBEDDING CONFIGURATION
+# ============================================================
+#
+# IMPORTANT:
+# DeepSeek chat models are not automatically embedding models.
+#
+# Therefore, this RAG application uses a separate embedding
+# model for Chroma.
+#
+# HuggingFace embeddings run locally and do not require an
+# additional LLM API.
+#
+# ============================================================
+
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+# ============================================================
+# LOAD EMBEDDINGS
 # ============================================================
 
 @st.cache_resource
 def load_embeddings():
 
-    embeddings = OllamaEmbeddings(
-        model=EMBEDDING_MODEL
+    from langchain_huggingface import (
+        HuggingFaceEmbeddings
+    )
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL
     )
 
     return embeddings
@@ -78,14 +105,17 @@ embeddings = load_embeddings()
 
 
 # ============================================================
-# LOAD LLM
+# LOAD DEEPSEEK MODEL
 # ============================================================
 
 @st.cache_resource
 def load_llm():
 
-    llm = OllamaLLM(
-        model=LLM_MODEL
+    llm = ChatOpenAI(
+        model=DEEPSEEK_MODEL,
+        api_key=DEEPSEEK_API_KEY,
+        base_url=DEEPSEEK_BASE_URL,
+        temperature=0
     )
 
     return llm
@@ -95,12 +125,14 @@ llm = load_llm()
 
 
 # ============================================================
-# LOAD PDF FILE
+# LOAD PDF
 # ============================================================
 
 def extract_text_from_pdf(file_path):
 
-    loader = PyPDFLoader(file_path)
+    loader = PyPDFLoader(
+        file_path
+    )
 
     documents = loader.load()
 
@@ -108,7 +140,7 @@ def extract_text_from_pdf(file_path):
 
 
 # ============================================================
-# LOAD CSV FILE
+# LOAD CSV
 # ============================================================
 
 def extract_text_from_csv(file_path):
@@ -124,10 +156,13 @@ def extract_text_from_csv(file_path):
 
 
 # ============================================================
-# LOAD DOCUMENT
+# LOAD DOCUMENT BASED ON FILE TYPE
 # ============================================================
 
-def load_document(file_path, file_type):
+def load_document(
+    file_path,
+    file_type
+):
 
     if file_type == "pdf":
 
@@ -199,25 +234,27 @@ def generate_response(
 
     prompt = ChatPromptTemplate.from_template(
         """
-You are a helpful document question-answering assistant.
+You are an intelligent document question-answering assistant.
 
-Answer the user's question ONLY using the information
-contained in the provided context.
+Your job is to answer the user's question using ONLY the
+information contained in the provided context.
 
-If the answer cannot be found in the context,
-say:
+IMPORTANT RULES:
 
-"I could not find the answer in the uploaded document."
-
-Do not make up information.
-
-Keep the answer clear and easy to understand.
+1. Do not invent information.
+2. Do not use outside knowledge.
+3. If the answer is not available in the context, clearly say:
+   "I could not find the answer in the uploaded document."
+4. Give a clear and accurate answer.
+5. If the question requires multiple points, use bullet points.
+6. If the context contains numbers, dates, names, or values,
+   preserve them accurately.
 
 <context>
 {context}
 </context>
 
-Question:
+User Question:
 {input}
 
 Answer:
@@ -265,13 +302,16 @@ Answer:
 # ============================================================
 
 uploaded_file = st.file_uploader(
-    "📁 Upload PDF or CSV file",
-    type=["pdf", "csv"]
+    "📁 Upload PDF or CSV",
+    type=[
+        "pdf",
+        "csv"
+    ]
 )
 
 
 # ============================================================
-# PROCESS FILE
+# PROCESS UPLOADED FILE
 # ============================================================
 
 if uploaded_file is not None:
@@ -284,7 +324,7 @@ if uploaded_file is not None:
 
 
     # --------------------------------------------------------
-    # SHOW FILE INFORMATION
+    # DISPLAY FILE NAME
     # --------------------------------------------------------
 
     st.success(
@@ -307,19 +347,24 @@ if uploaded_file is not None:
     else:
 
         st.error(
-            "Unsupported file format."
+            "Unsupported file type."
         )
 
         st.stop()
 
 
     # --------------------------------------------------------
-    # SAVE FILE TEMPORARILY
+    # TEMPORARY FILE
     # --------------------------------------------------------
 
     temp_file_path = None
 
+
     try:
+
+        # ----------------------------------------------------
+        # SAVE UPLOADED FILE
+        # ----------------------------------------------------
 
         with tempfile.NamedTemporaryFile(
             delete=False,
@@ -334,11 +379,11 @@ if uploaded_file is not None:
 
 
         # ----------------------------------------------------
-        # PROCESSING MESSAGE
+        # LOAD DOCUMENT
         # ----------------------------------------------------
 
         with st.spinner(
-            "📖 Reading uploaded document..."
+            "📖 Reading document..."
         ):
 
             documents = load_document(
@@ -354,14 +399,15 @@ if uploaded_file is not None:
         if not documents:
 
             st.error(
-                "No readable content was found in the file."
+                "No readable content was found."
             )
 
             st.stop()
 
 
         st.success(
-            f"Successfully loaded {len(documents)} document sections."
+            f"Successfully loaded "
+            f"{len(documents)} document sections."
         )
 
 
@@ -384,11 +430,11 @@ if uploaded_file is not None:
 
 
         # ----------------------------------------------------
-        # CREATE VECTOR DATABASE
+        # CREATE VECTOR STORE
         # ----------------------------------------------------
 
         with st.spinner(
-            "🧠 Creating vector database..."
+            "🧠 Creating Chroma vector database..."
         ):
 
             vector_store = create_vector_store(
@@ -397,7 +443,7 @@ if uploaded_file is not None:
 
 
         st.success(
-            "Vector database created successfully."
+            "✅ Vector database created successfully."
         )
 
 
@@ -412,18 +458,20 @@ if uploaded_file is not None:
 
         query = st.text_input(
             "Enter your question:",
-            placeholder="Example: What is this document about?"
+            placeholder=(
+                "Example: What is this document about?"
+            )
         )
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # ASK QUESTION
-        # ----------------------------------------------------
+        # ====================================================
 
         if query:
 
             with st.spinner(
-                "🤖 Searching document and generating answer..."
+                "🤖 DeepSeek is analyzing the document..."
             ):
 
                 answer, matching_docs = generate_response(
@@ -437,7 +485,7 @@ if uploaded_file is not None:
             # ------------------------------------------------
 
             st.subheader(
-                "🤖 Answer"
+                "🤖 DeepSeek Answer"
             )
 
             st.write(
@@ -446,7 +494,7 @@ if uploaded_file is not None:
 
 
             # ------------------------------------------------
-            # SHOW SOURCES
+            # DISPLAY SOURCES
             # ------------------------------------------------
 
             with st.expander(
@@ -474,14 +522,17 @@ if uploaded_file is not None:
                     if "page" in doc.metadata:
 
                         st.caption(
-                            f"Page: {doc.metadata['page'] + 1}"
+                            "Page: "
+                            + str(
+                                doc.metadata["page"] + 1
+                            )
                         )
 
 
     except Exception as e:
 
         st.error(
-            "An error occurred while processing the file."
+            "❌ An error occurred."
         )
 
         st.exception(e)
@@ -490,11 +541,11 @@ if uploaded_file is not None:
     finally:
 
         # ----------------------------------------------------
-        # DELETE TEMPORARY FILE
+        # REMOVE TEMPORARY FILE
         # ----------------------------------------------------
 
         if (
-            temp_file_path is not None
+            temp_file_path
             and os.path.exists(temp_file_path)
         ):
 
@@ -504,13 +555,13 @@ if uploaded_file is not None:
 
 
 # ============================================================
-# NO FILE MESSAGE
+# NO FILE
 # ============================================================
 
 else:
 
-    st.warning(
-        "Please upload a PDF or CSV file to start."
+    st.info(
+        "👆 Please upload a PDF or CSV file to start."
     )
 
 
@@ -525,17 +576,25 @@ with st.sidebar:
     )
 
     st.write(
-        f"Embedding Model: `{EMBEDDING_MODEL}`"
+        "### AI Model"
+    )
+
+    st.code(
+        DEEPSEEK_MODEL
     )
 
     st.write(
-        f"LLM Model: `{LLM_MODEL}`"
+        "### Embedding Model"
+    )
+
+    st.code(
+        EMBEDDING_MODEL
     )
 
     st.divider()
 
     st.write(
-        "Supported files:"
+        "### Supported Files"
     )
 
     st.write(
@@ -548,6 +607,10 @@ with st.sidebar:
 
     st.divider()
 
-    st.write(
-        "Powered by LangChain + Chroma + Ollama"
+    st.caption(
+        "RAG Application"
+    )
+
+    st.caption(
+        "LangChain + Chroma + DeepSeek"
     )
