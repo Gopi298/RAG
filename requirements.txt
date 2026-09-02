@@ -1,4 +1,6 @@
 streamlit
-PyPDF2
-openai
-numpy
+google-generativeai
+langchain-community
+pypdf
+pandas
+faiss-cpu
