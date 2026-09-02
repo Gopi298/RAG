@@ -1,92 +1,122 @@
 import os
 import pandas as pd
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import GooglePalmEmbeddings
 
-# Configure Streamlit page layout
-st.set_page_config(page_title="Multi-Document QA Bot", layout="wide")
-st.title("📄 Document & Data Q&A Bot")
+# 1. Page Configuration
+st.set_page_config(
+    page_title="Document & Data Q&A Bot", page_icon="🤖", layout="wide"
+)
+st.title("📄 Multi-Format Data Q&A Assistant")
 
-# API Key Sidebar Configuration
-st.sidebar.header("Configuration")
-api_key = st.sidebar.text_input("Enter Google Gemini API Key", type="password")
+# 2. Authentication Setup (Prioritize Streamlit Secrets, fallback to Sidebar Input)
+api_key = st.secrets.get("GEMINI_API_KEY", "")
 
-if api_key:
-    genai.configure(api_key=api_key)
+if not api_key:
+    api_key = st.sidebar.text_input(
+        "Enter Gemini API Key (AIzaSy...)", type="password"
+    )
 
-# File Uploader component
+if not api_key:
+    st.warning("⚠️ Please provide a Gemini API Key to proceed.")
+    st.stop()
+
+# Initialize Google GenAI Client
+client = genai.Client(api_key=api_key)
+
+# 3. File Upload Interface
 uploaded_file = st.sidebar.file_uploader(
     "Upload a PDF or CSV file", type=["pdf", "csv"]
 )
 
-if uploaded_file and api_key:
-    file_type = uploaded_file.name.split(".")[-1].lower()
+if uploaded_file:
+    file_extension = uploaded_file.name.split(".")[-1].lower()
 
-    # Handling CSV Files
-    if file_type == "csv":
-        df = pd.read_csv(uploaded_file)
-        st.subheader("Data Preview")
-        st.dataframe(df.head())
+    # ==================== CSV ANALYSIS ====================
+    if file_extension == "csv":
+        st.subheader("📊 CSV Data Preview")
+        try:
+            df = pd.read_csv(uploaded_file)
+            st.dataframe(df.head(10), use_container_width=True)
 
-        query = st.text_input("Ask a question about your CSV data:")
-        if query:
-            with st.spinner("Analyzing data..."):
-                model = genai.GenerativeModel("gemini-1.5-flash")
-                prompt = f"""
-                You are a data analyst. Answer the user's question based strictly on the dataset context provided.
-                
-                Dataset Schema and First 50 Rows:
-                {df.head(50).to_string()}
-                
-                User Query: {query}
-                """
-                response = model.generate_content(prompt)
-                st.write("**Answer:**")
-                st.write(response.text)
+            user_query = st.text_input("Ask a question about your CSV data:")
 
-    # Handling PDF Files
-    elif file_type == "pdf":
-        # Save file temporarily to disk for PyPDFLoader processing
-        temp_pdf_path = f"temp_{uploaded_file.name}"
-        with open(temp_pdf_path, "wb") as f:
+            if user_query:
+                with st.spinner("Analyzing spreadsheet..."):
+                    prompt = f"""
+                    You are an expert data analyst. Answer the user's question based strictly on the provided dataset preview and schema.
+
+                    Dataset Context (First 50 Rows):
+                    {df.head(50).to_string()}
+
+                    User Question: {user_query}
+                    """
+
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash", contents=prompt
+                    )
+
+                    st.markdown("### 💡 Answer:")
+                    st.write(response.text)
+        except Exception as e:
+            st.error(f"Error reading CSV file: {e}")
+
+    # ==================== PDF ANALYSIS ====================
+    elif file_extension == "pdf":
+        st.subheader("📑 PDF Document Processing")
+
+        # Write uploaded file to a temporary location for PyPDFLoader
+        temp_file_path = f"temp_{uploaded_file.name}"
+        with open(temp_file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        st.info("Processing PDF document...")
+        try:
+            # Chunking document
+            loader = PyPDFLoader(temp_file_path)
+            documents = loader.load()
 
-        # Load and chunk PDF content
-        loader = PyPDFLoader(temp_pdf_path)
-        docs = loader.load()
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, chunk_overlap=200
-        )
-        splits = text_splitter.split_documents(docs)
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000, chunk_overlap=150
+            )
+            chunks = text_splitter.split_documents(documents)
 
-        query = st.text_input("Ask a question about your PDF document:")
-        if query:
-            with st.spinner("Extracting relevant context and generating response..."):
-                # Retrieve top relevant text chunks
-                full_text = "\n\n".join([doc.page_content for doc in splits[:5]])
+            st.success(
+                f"Successfully parsed document into {len(chunks)} text chunks."
+            )
 
-                model = genai.GenerativeModel("gemini-1.5-flash")
-                prompt = f"""
-                Answer the question based strictly on the following context from the document:
-                
-                Context:
-                {full_text}
-                
-                Question: {query}
-                """
-                response = model.generate_content(prompt)
-                st.write("**Answer:**")
-                st.write(response.text)
+            user_query = st.text_input(
+                "Ask a question about your PDF document:"
+            )
 
-        # Clean up temporary file
-        if os.path.exists(temp_pdf_path):
-            os.remove(temp_pdf_path)
+            if user_query:
+                with st.spinner("Searching document & generating answer..."):
+                    # Extract top relevant context chunks
+                    document_context = "\n\n".join(
+                        [chunk.page_content for chunk in chunks[:5]]
+                    )
 
-elif not api_key:
-    st.warning("Please enter your Gemini API Key in the sidebar to proceed.")
+                    prompt = f"""
+                    You are a helpful document assistant. Answer the user's question strictly using the provided context from the PDF document.
+
+                    Document Context:
+                    {document_context}
+
+                    User Question: {user_query}
+                    """
+
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash", contents=prompt
+                    )
+
+                    st.markdown("### 💡 Answer:")
+                    st.write(response.text)
+
+        except Exception as e:
+            st.error(f"Error processing PDF file: {e}")
+
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
