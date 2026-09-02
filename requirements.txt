@@ -1,11 +1,7 @@
 ```text
 streamlit
 PyPDF2
-langchain
-langchain-community
-langchain-core
-langchain-text-splitters
-langchain-openai
-faiss-cpu
 openai
+faiss-cpu
+numpy
 ```
