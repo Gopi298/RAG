@@ -5,11 +5,16 @@ import streamlit as st
 from PyPDF2 import PdfReader
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+
 from langchain_community.vectorstores import FAISS
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains.combine_documents import create_stuff_documents_chain
+
+from langchain.chains.combine_documents import (
+    create_stuff_documents_chain
+)
 
 
 # ============================================================
@@ -24,39 +29,100 @@ st.set_page_config(
 
 
 # ============================================================
+# CUSTOM CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .main-title {
+        font-size: 42px;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 10px;
+    }
+
+    .subtitle {
+        text-align: center;
+        font-size: 18px;
+        color: #666666;
+        margin-bottom: 30px;
+    }
+
+    .answer-box {
+        padding: 20px;
+        border-radius: 15px;
+        background-color: #f5f7fb;
+        border: 1px solid #dddddd;
+        margin-top: 20px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">📚 PDF Chatbot</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">Upload your PDF and ask questions from the document</div>',
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
 # OPENAI API KEY
 # ============================================================
 
 # IMPORTANT:
-# Do NOT put your API key directly in this Python file.
 #
-# For Streamlit Cloud:
-# Go to:
-# App -> Settings -> Secrets
+# DO NOT put your OpenAI API key directly in this file.
+#
+# Streamlit Cloud:
+#
+# Manage App
+#     ↓
+# Settings
+#     ↓
+# Secrets
 #
 # Add:
 #
 # OPENAI_API_KEY = "your-new-api-key"
 #
-# Then the code below will read it.
+# ============================================================
 
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+OPENAI_API_KEY = st.secrets.get(
+    "OPENAI_API_KEY",
+    os.getenv("OPENAI_API_KEY")
+)
 
+
+# ============================================================
+# CHECK API KEY
+# ============================================================
 
 if not OPENAI_API_KEY:
+
     st.error(
-        "OpenAI API key is missing. "
-        "Add OPENAI_API_KEY in Streamlit Cloud Secrets."
+        "❌ OpenAI API key is missing."
     )
+
+    st.info(
+        "Go to Streamlit Cloud → Manage App → Settings → Secrets "
+        "and add OPENAI_API_KEY."
+    )
+
     st.stop()
-
-
-# ============================================================
-# TITLE
-# ============================================================
-
-st.title("📚 My PDF Chatbot")
-st.write("Upload a PDF and ask questions about its content.")
 
 
 # ============================================================
@@ -67,9 +133,19 @@ with st.sidebar:
 
     st.title("📄 Your Documents")
 
-    file = st.file_uploader(
-        "Upload a PDF file and start asking questions",
+    st.write(
+        "Upload a PDF document to start chatting."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload PDF",
         type=["pdf"]
+    )
+
+    st.divider()
+
+    st.info(
+        "Supported format: PDF"
     )
 
 
@@ -77,159 +153,260 @@ with st.sidebar:
 # PROCESS PDF
 # ============================================================
 
-if file is not None:
+if uploaded_file is not None:
 
-    # --------------------------------------------------------
-    # Read PDF
-    # --------------------------------------------------------
+    # ========================================================
+    # READ PDF
+    # ========================================================
 
-    pdf_reader = PdfReader(file)
+    try:
+
+        pdf_reader = PdfReader(
+            uploaded_file
+        )
+
+    except Exception as e:
+
+        st.error(
+            "❌ Unable to read the PDF."
+        )
+
+        st.exception(e)
+
+        st.stop()
+
+
+    # ========================================================
+    # EXTRACT TEXT
+    # ========================================================
 
     text = ""
 
-    for page in pdf_reader.pages:
+    for page_number, page in enumerate(
+        pdf_reader.pages,
+        start=1
+    ):
 
-        page_text = page.extract_text()
+        try:
 
-        if page_text:
-            text += page_text + "\n"
+            page_text = page.extract_text()
+
+            if page_text:
+
+                text += page_text + "\n"
+
+        except Exception:
+
+            continue
 
 
-    # --------------------------------------------------------
-    # Check extracted text
-    # --------------------------------------------------------
+    # ========================================================
+    # CHECK TEXT
+    # ========================================================
 
     if not text.strip():
 
         st.error(
-            "No readable text was found in this PDF. "
-            "If this is a scanned PDF, OCR may be required."
+            "❌ No readable text was found in this PDF."
+        )
+
+        st.warning(
+            "This may be a scanned/image-only PDF. "
+            "OCR is required for scanned documents."
         )
 
         st.stop()
 
 
-    # --------------------------------------------------------
-    # Split text into chunks
-    # --------------------------------------------------------
+    # ========================================================
+    # PDF INFORMATION
+    # ========================================================
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        separators=["\n\n", "\n", " ", ""],
-        chunk_size=1000,
-        chunk_overlap=150,
-        length_function=len
+    st.success(
+        "✅ PDF uploaded successfully!"
     )
 
-    chunks = text_splitter.split_text(text)
-
-
-    # --------------------------------------------------------
-    # Display PDF information
-    # --------------------------------------------------------
-
-    st.success("PDF uploaded successfully.")
-
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
+
         st.metric(
-            "Pages",
+            "📄 Pages",
             len(pdf_reader.pages)
         )
 
     with col2:
+
         st.metric(
-            "Text Chunks",
+            "📝 Characters",
+            len(text)
+        )
+
+    # ========================================================
+    # TEXT SPLITTER
+    # ========================================================
+
+    text_splitter = RecursiveCharacterTextSplitter(
+
+        separators=[
+            "\n\n",
+            "\n",
+            " ",
+            ""
+        ],
+
+        chunk_size=1000,
+
+        chunk_overlap=150,
+
+        length_function=len
+    )
+
+
+    chunks = text_splitter.split_text(
+        text
+    )
+
+
+    with col3:
+
+        st.metric(
+            "🧩 Chunks",
             len(chunks)
         )
 
 
     # ========================================================
-    # CREATE OPENAI EMBEDDINGS
+    # CREATE EMBEDDINGS
     # ========================================================
 
     try:
 
-        embeddings = OpenAIEmbeddings(
-            api_key=OPENAI_API_KEY,
-            model="text-embedding-3-small"
-        )
+        with st.spinner(
+            "🔄 Creating document embeddings..."
+        ):
+
+            embeddings = OpenAIEmbeddings(
+
+                api_key=OPENAI_API_KEY,
+
+                model="text-embedding-3-small"
+            )
 
     except Exception as e:
 
-        st.error("Error creating OpenAI embeddings.")
+        st.error(
+            "❌ Error creating OpenAI embeddings."
+        )
+
         st.exception(e)
+
         st.stop()
 
 
     # ========================================================
-    # CREATE FAISS VECTOR STORE
+    # CREATE FAISS VECTOR DATABASE
     # ========================================================
 
     try:
 
-        vector_store = FAISS.from_texts(
-            chunks,
-            embedding=embeddings
-        )
+        with st.spinner(
+            "🔄 Creating FAISS vector database..."
+        ):
+
+            vector_store = FAISS.from_texts(
+
+                chunks,
+
+                embedding=embeddings
+            )
 
     except Exception as e:
 
-        st.error("Error creating FAISS vector database.")
+        st.error(
+            "❌ Error creating FAISS vector database."
+        )
+
         st.exception(e)
+
         st.stop()
 
 
     # ========================================================
-    # USER QUESTION
+    # QUESTION INPUT
     # ========================================================
+
+    st.divider()
+
+    st.subheader(
+        "💬 Ask a Question"
+    )
 
     user_question = st.text_input(
-        "💬 Type your question here"
+        "Type your question here:",
+        placeholder="Example: What is this document about?"
     )
 
 
     # ========================================================
-    # QUESTION ANSWERING
+    # QUESTION PROCESSING
     # ========================================================
 
     if user_question:
 
-        # ----------------------------------------------------
-        # Similarity Search
-        # ----------------------------------------------------
+        # ====================================================
+        # SEARCH DOCUMENT
+        # ====================================================
 
         try:
 
-            documents = vector_store.similarity_search(
-                user_question,
-                k=4
-            )
+            with st.spinner(
+                "🔍 Searching the PDF..."
+            ):
+
+                documents = vector_store.similarity_search(
+
+                    user_question,
+
+                    k=4
+                )
 
         except Exception as e:
 
-            st.error("Error while searching the document.")
+            st.error(
+                "❌ Error searching the document."
+            )
+
             st.exception(e)
+
             st.stop()
 
 
-        # ----------------------------------------------------
-        # Create ChatGPT model
-        # ----------------------------------------------------
+        # ====================================================
+        # CREATE CHAT MODEL
+        # ====================================================
 
         try:
 
             llm = ChatOpenAI(
+
                 api_key=OPENAI_API_KEY,
+
                 model="gpt-4o-mini",
+
                 temperature=0,
+
                 max_tokens=1000
             )
 
         except Exception as e:
 
-            st.error("Error creating OpenAI model.")
+            st.error(
+                "❌ Error creating OpenAI Chat model."
+            )
+
             st.exception(e)
+
             st.stop()
 
 
@@ -239,26 +416,29 @@ if file is not None:
 
         prompt = ChatPromptTemplate.from_template(
             """
-You are a helpful PDF question-answering assistant.
+You are an intelligent PDF question-answering assistant.
 
-Answer the user's question using ONLY the information
-contained in the provided PDF context.
+Your job is to answer the user's question using ONLY
+the information contained in the provided PDF context.
 
-If the answer cannot be found in the PDF, say:
+Rules:
 
-"I could not find the answer in the uploaded PDF."
+1. Do not invent information.
+2. Do not use outside knowledge.
+3. If the answer is not available in the PDF, say:
+   "I could not find the answer in the uploaded PDF."
+4. Give a clear and useful answer.
+5. If possible, explain the answer in simple language.
 
-Do not invent information.
+PDF CONTEXT:
 
-Keep the answer clear and concise.
-
-Context:
 {context}
 
-Question:
+USER QUESTION:
+
 {input}
 
-Answer:
+ANSWER:
 """
         )
 
@@ -270,14 +450,20 @@ Answer:
         try:
 
             document_chain = create_stuff_documents_chain(
+
                 llm,
+
                 prompt
             )
 
         except Exception as e:
 
-            st.error("Error creating document chain.")
+            st.error(
+                "❌ Error creating LangChain document chain."
+            )
+
             st.exception(e)
+
             st.stop()
 
 
@@ -287,34 +473,93 @@ Answer:
 
         try:
 
-            response = document_chain.invoke(
-                {
-                    "input": user_question,
-                    "context": documents
-                }
-            )
+            with st.spinner(
+                "🤖 Generating answer..."
+            ):
 
-            st.subheader("🤖 Answer")
-
-            st.write(response)
+                response = document_chain.invoke(
+                    {
+                        "input": user_question,
+                        "context": documents
+                    }
+                )
 
         except Exception as e:
 
-            st.error("Error generating answer.")
+            st.error(
+                "❌ Error generating answer."
+            )
+
             st.exception(e)
+
+            st.stop()
+
+
+        # ====================================================
+        # DISPLAY ANSWER
+        # ====================================================
+
+        st.subheader(
+            "🤖 Answer"
+        )
+
+        st.markdown(
+            f"""
+            <div class="answer-box">
+
+            {response}
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 
         # ====================================================
         # SHOW SOURCES
         # ====================================================
 
-        with st.expander("📖 View Retrieved PDF Content"):
+        st.divider()
 
-            for i, document in enumerate(documents):
+        with st.expander(
+            "📖 View Retrieved PDF Sources"
+        ):
+
+            for index, document in enumerate(
+                documents,
+                start=1
+            ):
 
                 st.markdown(
-                    f"### Source {i + 1}"
+                    f"### 📄 Source {index}"
                 )
 
-                st.write(document.page_content)
+                st.write(
+                    document.page_content
+                )
+
+                st.divider()
+
+
+# ============================================================
+# NO PDF MESSAGE
+# ============================================================
+
+else:
+
+    st.info(
+        "👈 Upload a PDF from the sidebar to start."
+    )
+
+    st.markdown(
+        """
+        ### How to use
+
+        1. Upload a PDF.
+        2. Wait for the document to be processed.
+        3. Enter your question.
+        4. The chatbot searches the PDF.
+        5. The AI generates an answer from the retrieved content.
+        """
+    )
 ```
