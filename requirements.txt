@@ -1,7 +1,4 @@
-```text
 streamlit
 PyPDF2
 openai
-faiss-cpu
 numpy
-```
