@@ -1,123 +1,553 @@
+# ============================================================
+# PDF + CSV RAG QUESTION ANSWERING APPLICATION
+# Streamlit + LangChain + Chroma + Ollama
+# ============================================================
+
 import os
+import tempfile
+import shutil
+
 import streamlit as st
 
-# Document Loading & Text Splitting
-from langchain_community.document_loaders import TextLoader
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    CSVLoader
+)
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Vector Stores & Embeddings (Modern Updated Imports)
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
+from langchain_chroma import Chroma
 
-# Transformers Pipeline
-from transformers import pipeline
+from langchain_ollama import (
+    OllamaEmbeddings,
+    OllamaLLM
+)
 
-# --- Page Config ---
-st.set_page_config(page_title="RAG AI Assistant", page_icon="🤖", layout="wide")
-st.title("🤖 Knowledge Base Assistant")
-st.caption("Ask questions powered by your custom document context and Qwen2.5.")
+from langchain_core.prompts import ChatPromptTemplate
 
-DATA_PATH = "data/About_Ai.txt"
+from langchain.chains.combine_documents import (
+    create_stuff_documents_chain
+)
 
-# --- Cached Resource Loading ---
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="PDF & CSV RAG Assistant",
+    page_icon="📚",
+    layout="wide"
+)
+
+
+# ============================================================
+# PAGE TITLE
+# ============================================================
+
+st.title("📚 PDF & CSV Question-Answering RAG App")
+
+st.write(
+    "Upload a PDF or CSV file and ask questions based on its content."
+)
+
+
+# ============================================================
+# OLLAMA CONFIGURATION
+# ============================================================
+
+EMBEDDING_MODEL = "nomic-embed-text"
+LLM_MODEL = "llama3.1"
+
+
+# ============================================================
+# CREATE EMBEDDINGS
+# ============================================================
+
 @st.cache_resource
-def load_vector_store():
-    """Load text, chunk it, generate embeddings, and build the FAISS vector index."""
-    # Ensure data directory and file exist to prevent cold-start crashes
-    if not os.path.exists(DATA_PATH):
-        os.makedirs("data", exist_ok=True)
-        with open(DATA_PATH, "w", encoding="utf-8") as f:
-            f.write("Welcome to Karthik's Show! This is a placeholder context document about AI.")
-            
-    loader = TextLoader(DATA_PATH, encoding="utf-8")
-    docs = loader.load()
+def load_embeddings():
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
-    chunks = splitter.split_documents(docs)
+    embeddings = OllamaEmbeddings(
+        model=EMBEDDING_MODEL
+    )
 
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    db = FAISS.from_documents(chunks, embeddings)
-    return db.as_retriever()
+    return embeddings
 
+
+embeddings = load_embeddings()
+
+
+# ============================================================
+# LOAD LLM
+# ============================================================
 
 @st.cache_resource
 def load_llm():
-    """Initialize HuggingFace text-generation pipeline."""
-    pipe = pipeline(
-        "text-generation",
-        model="Qwen/Qwen2.5-1.5B-Instruct",
-        max_new_tokens=256,
-        temperature=0.2,
-        do_sample=True
+
+    llm = OllamaLLM(
+        model=LLM_MODEL
     )
-    return HuggingFacePipeline(pipeline=pipe)
 
-# Initialize resources once
-with st.spinner("Initializing embeddings and loading model into memory..."):
-    retriever = load_vector_store()
-    llm = load_llm()
+    return llm
 
-# --- RAG Chain Handler ---
-def get_rag_response(question: str):
-    docs = retriever.invoke(question)
-    context = "\n\n".join([d.page_content for d in docs])
 
-    prompt_text = f"""You are an AI assistant. Use ONLY the provided context to answer.
-If the answer is not in the context, say "I don't know".
+llm = load_llm()
 
-Context:
+
+# ============================================================
+# LOAD PDF FILE
+# ============================================================
+
+def extract_text_from_pdf(file_path):
+
+    loader = PyPDFLoader(file_path)
+
+    documents = loader.load()
+
+    return documents
+
+
+# ============================================================
+# LOAD CSV FILE
+# ============================================================
+
+def extract_text_from_csv(file_path):
+
+    loader = CSVLoader(
+        file_path=file_path,
+        encoding="utf-8"
+    )
+
+    documents = loader.load()
+
+    return documents
+
+
+# ============================================================
+# LOAD DOCUMENT
+# ============================================================
+
+def load_document(file_path, file_type):
+
+    if file_type == "pdf":
+
+        documents = extract_text_from_pdf(
+            file_path
+        )
+
+    elif file_type == "csv":
+
+        documents = extract_text_from_csv(
+            file_path
+        )
+
+    else:
+
+        documents = []
+
+    return documents
+
+
+# ============================================================
+# SPLIT DOCUMENTS INTO CHUNKS
+# ============================================================
+
+def split_documents(
+    documents,
+    chunk_size=1000,
+    chunk_overlap=200
+):
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+
+    chunks = text_splitter.split_documents(
+        documents
+    )
+
+    return chunks
+
+
+# ============================================================
+# CREATE VECTOR STORE
+# ============================================================
+
+def create_vector_store(chunks):
+
+    vector_store = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings
+    )
+
+    return vector_store
+
+
+# ============================================================
+# GENERATE RESPONSE
+# ============================================================
+
+def generate_response(
+    vector_store,
+    query
+):
+
+    # --------------------------------------------------------
+    # PROMPT
+    # --------------------------------------------------------
+
+    prompt = ChatPromptTemplate.from_template(
+        """
+You are a helpful document question-answering assistant.
+
+Answer the user's question ONLY using the information
+contained in the provided context.
+
+If the answer cannot be found in the context,
+say:
+
+"I could not find the answer in the uploaded document."
+
+Do not make up information.
+
+Keep the answer clear and easy to understand.
+
+<context>
 {context}
+</context>
 
-Question: {question}
+Question:
+{input}
 
-Answer:"""
+Answer:
+"""
+    )
 
-    raw = llm.invoke(prompt_text)
-    answer = raw.replace(prompt_text, "").strip()
-    return answer, docs
 
-# --- Sidebar ---
+    # --------------------------------------------------------
+    # CREATE DOCUMENT CHAIN
+    # --------------------------------------------------------
+
+    document_chain = create_stuff_documents_chain(
+        llm,
+        prompt
+    )
+
+
+    # --------------------------------------------------------
+    # SIMILARITY SEARCH
+    # --------------------------------------------------------
+
+    matching_docs = vector_store.similarity_search(
+        query,
+        k=5
+    )
+
+
+    # --------------------------------------------------------
+    # GENERATE ANSWER
+    # --------------------------------------------------------
+
+    response = document_chain.invoke(
+        {
+            "input": query,
+            "context": matching_docs
+        }
+    )
+
+
+    return response, matching_docs
+
+
+# ============================================================
+# FILE UPLOADER
+# ============================================================
+
+uploaded_file = st.file_uploader(
+    "📁 Upload PDF or CSV file",
+    type=["pdf", "csv"]
+)
+
+
+# ============================================================
+# PROCESS FILE
+# ============================================================
+
+if uploaded_file is not None:
+
+    file_name = uploaded_file.name
+
+    file_extension = os.path.splitext(
+        file_name
+    )[1].lower()
+
+
+    # --------------------------------------------------------
+    # SHOW FILE INFORMATION
+    # --------------------------------------------------------
+
+    st.success(
+        f"Uploaded file: {file_name}"
+    )
+
+
+    # --------------------------------------------------------
+    # DETERMINE FILE TYPE
+    # --------------------------------------------------------
+
+    if file_extension == ".pdf":
+
+        file_type = "pdf"
+
+    elif file_extension == ".csv":
+
+        file_type = "csv"
+
+    else:
+
+        st.error(
+            "Unsupported file format."
+        )
+
+        st.stop()
+
+
+    # --------------------------------------------------------
+    # SAVE FILE TEMPORARILY
+    # --------------------------------------------------------
+
+    temp_file_path = None
+
+    try:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_extension
+        ) as temp_file:
+
+            temp_file.write(
+                uploaded_file.getbuffer()
+            )
+
+            temp_file_path = temp_file.name
+
+
+        # ----------------------------------------------------
+        # PROCESSING MESSAGE
+        # ----------------------------------------------------
+
+        with st.spinner(
+            "📖 Reading uploaded document..."
+        ):
+
+            documents = load_document(
+                temp_file_path,
+                file_type
+            )
+
+
+        # ----------------------------------------------------
+        # CHECK DOCUMENT
+        # ----------------------------------------------------
+
+        if not documents:
+
+            st.error(
+                "No readable content was found in the file."
+            )
+
+            st.stop()
+
+
+        st.success(
+            f"Successfully loaded {len(documents)} document sections."
+        )
+
+
+        # ----------------------------------------------------
+        # SPLIT DOCUMENT
+        # ----------------------------------------------------
+
+        with st.spinner(
+            "✂️ Splitting document into chunks..."
+        ):
+
+            chunks = split_documents(
+                documents
+            )
+
+
+        st.info(
+            f"Created {len(chunks)} text chunks."
+        )
+
+
+        # ----------------------------------------------------
+        # CREATE VECTOR DATABASE
+        # ----------------------------------------------------
+
+        with st.spinner(
+            "🧠 Creating vector database..."
+        ):
+
+            vector_store = create_vector_store(
+                chunks
+            )
+
+
+        st.success(
+            "Vector database created successfully."
+        )
+
+
+        # ====================================================
+        # QUESTION SECTION
+        # ====================================================
+
+        st.subheader(
+            "💬 Ask a Question"
+        )
+
+
+        query = st.text_input(
+            "Enter your question:",
+            placeholder="Example: What is this document about?"
+        )
+
+
+        # ----------------------------------------------------
+        # ASK QUESTION
+        # ----------------------------------------------------
+
+        if query:
+
+            with st.spinner(
+                "🤖 Searching document and generating answer..."
+            ):
+
+                answer, matching_docs = generate_response(
+                    vector_store,
+                    query
+                )
+
+
+            # ------------------------------------------------
+            # DISPLAY ANSWER
+            # ------------------------------------------------
+
+            st.subheader(
+                "🤖 Answer"
+            )
+
+            st.write(
+                answer
+            )
+
+
+            # ------------------------------------------------
+            # SHOW SOURCES
+            # ------------------------------------------------
+
+            with st.expander(
+                "📄 View Retrieved Sources"
+            ):
+
+                for index, doc in enumerate(
+                    matching_docs,
+                    start=1
+                ):
+
+                    st.markdown(
+                        f"### Source {index}"
+                    )
+
+                    st.write(
+                        doc.page_content
+                    )
+
+
+                    # ----------------------------------------
+                    # PDF PAGE NUMBER
+                    # ----------------------------------------
+
+                    if "page" in doc.metadata:
+
+                        st.caption(
+                            f"Page: {doc.metadata['page'] + 1}"
+                        )
+
+
+    except Exception as e:
+
+        st.error(
+            "An error occurred while processing the file."
+        )
+
+        st.exception(e)
+
+
+    finally:
+
+        # ----------------------------------------------------
+        # DELETE TEMPORARY FILE
+        # ----------------------------------------------------
+
+        if (
+            temp_file_path is not None
+            and os.path.exists(temp_file_path)
+        ):
+
+            os.unlink(
+                temp_file_path
+            )
+
+
+# ============================================================
+# NO FILE MESSAGE
+# ============================================================
+
+else:
+
+    st.warning(
+        "Please upload a PDF or CSV file to start."
+    )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
 with st.sidebar:
-    st.header("⚙️ App Info")
-    st.markdown("**LLM:** Qwen/Qwen2.5-1.5B-Instruct")
-    st.markdown("**Embeddings:** all-MiniLM-L6-v2")
-    st.markdown("**Vector Store:** FAISS")
+
+    st.header(
+        "⚙️ Configuration"
+    )
+
+    st.write(
+        f"Embedding Model: `{EMBEDDING_MODEL}`"
+    )
+
+    st.write(
+        f"LLM Model: `{LLM_MODEL}`"
+    )
+
     st.divider()
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        st.rerun()
 
-# --- Chat Interface ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.write(
+        "Supported files:"
+    )
 
-# Display history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if "retrieved_docs" in msg:
-            with st.expander("📄 View Retrieved Context"):
-                for idx, doc in enumerate(msg["retrieved_docs"]):
-                    st.markdown(f"**Chunk {idx+1}:**")
-                    st.caption(doc.page_content)
+    st.write(
+        "📄 PDF"
+    )
 
-# Process User Input
-if user_query := st.chat_input("Ask a question about your context document..."):
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.markdown(user_query)
+    st.write(
+        "📊 CSV"
+    )
 
-    with st.chat_message("assistant"):
-        with st.spinner("Searching knowledge base..."):
-            answer, retrieved_docs = get_rag_response(user_query)
-            st.markdown(answer)
-            with st.expander("📄 View Retrieved Context"):
-                for idx, doc in enumerate(retrieved_docs):
-                    st.markdown(f"**Chunk {idx+1}:**")
-                    st.caption(doc.page_content)
+    st.divider()
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": answer,
-        "retrieved_docs": retrieved_docs
-    })
+    st.write(
+        "Powered by LangChain + Chroma + Ollama"
+    )
