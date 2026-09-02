@@ -1,6 +1,6 @@
 streamlit
-google-generativeai
-langchain-community
-pypdf
+google-genai
 pandas
-faiss-cpu
+pypdf
+langchain-community
+langchain-text-splitters
