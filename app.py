@@ -21,11 +21,7 @@ from langchain_chroma import Chroma
 
 from langchain_openai import ChatOpenAI
 
-from langchain_core.prompts import ChatPromptTemplate
-
-from langchain.chains.combine_documents import (
-    create_stuff_documents_chain
-)
+from langchain_core.messages import HumanMessage
 
 
 # ============================================================
@@ -66,21 +62,12 @@ DEEPSEEK_MODEL = "DeepSeek-V4-Flash-0731-bucket"
 
 
 # ============================================================
-# EMBEDDING CONFIGURATION
-# ============================================================
-#
-# IMPORTANT:
-# DeepSeek chat models are not automatically embedding models.
-#
-# Therefore, this RAG application uses a separate embedding
-# model for Chroma.
-#
-# HuggingFace embeddings run locally and do not require an
-# additional LLM API.
-#
+# EMBEDDING MODEL
 # ============================================================
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL = (
+    "sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
 # ============================================================
@@ -105,7 +92,7 @@ embeddings = load_embeddings()
 
 
 # ============================================================
-# LOAD DEEPSEEK MODEL
+# LOAD DEEPSEEK
 # ============================================================
 
 @st.cache_resource
@@ -125,7 +112,7 @@ llm = load_llm()
 
 
 # ============================================================
-# LOAD PDF
+# PDF LOADER
 # ============================================================
 
 def extract_text_from_pdf(file_path):
@@ -140,7 +127,7 @@ def extract_text_from_pdf(file_path):
 
 
 # ============================================================
-# LOAD CSV
+# CSV LOADER
 # ============================================================
 
 def extract_text_from_csv(file_path):
@@ -156,7 +143,7 @@ def extract_text_from_csv(file_path):
 
 
 # ============================================================
-# LOAD DOCUMENT BASED ON FILE TYPE
+# LOAD DOCUMENT
 # ============================================================
 
 def load_document(
@@ -166,25 +153,21 @@ def load_document(
 
     if file_type == "pdf":
 
-        documents = extract_text_from_pdf(
+        return extract_text_from_pdf(
             file_path
         )
 
     elif file_type == "csv":
 
-        documents = extract_text_from_csv(
+        return extract_text_from_csv(
             file_path
         )
 
-    else:
-
-        documents = []
-
-    return documents
+    return []
 
 
 # ============================================================
-# SPLIT DOCUMENTS INTO CHUNKS
+# TEXT CHUNKING
 # ============================================================
 
 def split_documents(
@@ -220,7 +203,7 @@ def create_vector_store(chunks):
 
 
 # ============================================================
-# GENERATE RESPONSE
+# GENERATE DEEPSEEK RESPONSE
 # ============================================================
 
 def generate_response(
@@ -229,51 +212,7 @@ def generate_response(
 ):
 
     # --------------------------------------------------------
-    # PROMPT
-    # --------------------------------------------------------
-
-    prompt = ChatPromptTemplate.from_template(
-        """
-You are an intelligent document question-answering assistant.
-
-Your job is to answer the user's question using ONLY the
-information contained in the provided context.
-
-IMPORTANT RULES:
-
-1. Do not invent information.
-2. Do not use outside knowledge.
-3. If the answer is not available in the context, clearly say:
-   "I could not find the answer in the uploaded document."
-4. Give a clear and accurate answer.
-5. If the question requires multiple points, use bullet points.
-6. If the context contains numbers, dates, names, or values,
-   preserve them accurately.
-
-<context>
-{context}
-</context>
-
-User Question:
-{input}
-
-Answer:
-"""
-    )
-
-
-    # --------------------------------------------------------
-    # CREATE DOCUMENT CHAIN
-    # --------------------------------------------------------
-
-    document_chain = create_stuff_documents_chain(
-        llm,
-        prompt
-    )
-
-
-    # --------------------------------------------------------
-    # SIMILARITY SEARCH
+    # SEARCH VECTOR DATABASE
     # --------------------------------------------------------
 
     matching_docs = vector_store.similarity_search(
@@ -283,18 +222,86 @@ Answer:
 
 
     # --------------------------------------------------------
-    # GENERATE ANSWER
+    # CREATE CONTEXT
     # --------------------------------------------------------
 
-    response = document_chain.invoke(
-        {
-            "input": query,
-            "context": matching_docs
-        }
+    context_parts = []
+
+    for index, doc in enumerate(
+        matching_docs,
+        start=1
+    ):
+
+        context_parts.append(
+            f"""
+SOURCE {index}:
+
+{doc.page_content}
+"""
+        )
+
+
+    context = "\n".join(
+        context_parts
     )
 
 
-    return response, matching_docs
+    # --------------------------------------------------------
+    # PROMPT
+    # --------------------------------------------------------
+
+    prompt = f"""
+You are an intelligent document question-answering assistant.
+
+Answer the user's question ONLY using the information
+contained in the provided context.
+
+IMPORTANT RULES:
+
+1. Do not invent information.
+2. Do not use outside knowledge.
+3. If the answer is not available in the context, say:
+   "I could not find the answer in the uploaded document."
+4. Give a clear and accurate answer.
+5. Use bullet points when appropriate.
+6. Preserve numbers, dates, names and values accurately.
+
+============================================================
+DOCUMENT CONTEXT
+============================================================
+
+{context}
+
+============================================================
+USER QUESTION
+============================================================
+
+{query}
+
+============================================================
+ANSWER
+============================================================
+"""
+
+
+    # --------------------------------------------------------
+    # SEND TO DEEPSEEK
+    # --------------------------------------------------------
+
+    response = llm.invoke(
+        [
+            HumanMessage(
+                content=prompt
+            )
+        ]
+    )
+
+
+    # --------------------------------------------------------
+    # RETURN ANSWER
+    # --------------------------------------------------------
+
+    return response.content, matching_docs
 
 
 # ============================================================
@@ -311,7 +318,7 @@ uploaded_file = st.file_uploader(
 
 
 # ============================================================
-# PROCESS UPLOADED FILE
+# PROCESS FILE
 # ============================================================
 
 if uploaded_file is not None:
@@ -324,7 +331,7 @@ if uploaded_file is not None:
 
 
     # --------------------------------------------------------
-    # DISPLAY FILE NAME
+    # DISPLAY FILE
     # --------------------------------------------------------
 
     st.success(
@@ -363,7 +370,7 @@ if uploaded_file is not None:
     try:
 
         # ----------------------------------------------------
-        # SAVE UPLOADED FILE
+        # SAVE FILE
         # ----------------------------------------------------
 
         with tempfile.NamedTemporaryFile(
@@ -430,11 +437,11 @@ if uploaded_file is not None:
 
 
         # ----------------------------------------------------
-        # CREATE VECTOR STORE
+        # VECTOR DATABASE
         # ----------------------------------------------------
 
         with st.spinner(
-            "🧠 Creating Chroma vector database..."
+            "🧠 Creating vector database..."
         ):
 
             vector_store = create_vector_store(
@@ -448,7 +455,7 @@ if uploaded_file is not None:
 
 
         # ====================================================
-        # QUESTION SECTION
+        # QUESTION
         # ====================================================
 
         st.subheader(
@@ -465,7 +472,7 @@ if uploaded_file is not None:
 
 
         # ====================================================
-        # ASK QUESTION
+        # ASK DEEPSEEK
         # ====================================================
 
         if query:
@@ -481,7 +488,7 @@ if uploaded_file is not None:
 
 
             # ------------------------------------------------
-            # DISPLAY ANSWER
+            # ANSWER
             # ------------------------------------------------
 
             st.subheader(
@@ -494,7 +501,7 @@ if uploaded_file is not None:
 
 
             # ------------------------------------------------
-            # DISPLAY SOURCES
+            # SOURCES
             # ------------------------------------------------
 
             with st.expander(
@@ -515,14 +522,10 @@ if uploaded_file is not None:
                     )
 
 
-                    # ----------------------------------------
-                    # PDF PAGE NUMBER
-                    # ----------------------------------------
-
                     if "page" in doc.metadata:
 
                         st.caption(
-                            "Page: "
+                            "PDF Page: "
                             + str(
                                 doc.metadata["page"] + 1
                             )
@@ -532,7 +535,7 @@ if uploaded_file is not None:
     except Exception as e:
 
         st.error(
-            "❌ An error occurred."
+            "❌ An error occurred while processing the file."
         )
 
         st.exception(e)
@@ -541,7 +544,7 @@ if uploaded_file is not None:
     finally:
 
         # ----------------------------------------------------
-        # REMOVE TEMPORARY FILE
+        # DELETE TEMP FILE
         # ----------------------------------------------------
 
         if (
@@ -606,10 +609,6 @@ with st.sidebar:
     )
 
     st.divider()
-
-    st.caption(
-        "RAG Application"
-    )
 
     st.caption(
         "LangChain + Chroma + DeepSeek"
