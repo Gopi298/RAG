@@ -1,11 +1,1 @@
-```text
-streamlit
-PyPDF2
-langchain
-langchain-community
-langchain-core
-langchain-text-splitters
-langchain-openai
-faiss-cpu
-openai
-```
+streamlit PyPDF2 langchain langchain-community langchain-core langchain-text-splitters langchain-openai faiss-cpu openai
