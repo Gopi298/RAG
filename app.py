@@ -1,122 +1,78 @@
-import os
-import pandas as pd
 import streamlit as st
-from google import genai
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from ultralytics import YOLO
+from PIL import Image
+import numpy as np
+import cv2
 
-# 1. Page Configuration
+# Page configuration
 st.set_page_config(
-    page_title="Document & Data Q&A Bot", page_icon="🤖", layout="wide"
-)
-st.title("📄 Multi-Format Data Q&A Assistant")
-
-# 2. Authentication Setup (Prioritize Streamlit Secrets, fallback to Sidebar Input)
-api_key = st.secrets.get("GEMINI_API_KEY", "")
-
-if not api_key:
-    api_key = st.sidebar.text_input(
-        "Enter Gemini API Key (AIzaSy...)", type="password"
-    )
-
-if not api_key:
-    st.warning("⚠️ Please provide a Gemini API Key to proceed.")
-    st.stop()
-
-# Initialize Google GenAI Client
-client = genai.Client(api_key=api_key)
-
-# 3. File Upload Interface
-uploaded_file = st.sidebar.file_uploader(
-    "Upload a PDF or CSV file", type=["pdf", "csv"]
+    page_title="Car Accident Detection",
+    page_icon="🚗",
+    layout="centered"
 )
 
-if uploaded_file:
-    file_extension = uploaded_file.name.split(".")[-1].lower()
+st.title("🚗 Car Accident & Traffic Detection (YOLOv8)")
+st.write("Upload an image to detect vehicles, traffic elements, and potential accidents.")
 
-    # ==================== CSV ANALYSIS ====================
-    if file_extension == "csv":
-        st.subheader("📊 CSV Data Preview")
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.dataframe(df.head(10), use_container_width=True)
+# Load the YOLO model once and cache it for performance
+@st.cache_resource
+def load_model():
+    # Uses yolov8x.pt (downloads automatically if not present locally)
+    return YOLO("yolov8x.pt")
 
-            user_query = st.text_input("Ask a question about your CSV data:")
+model = load_model()
 
-            if user_query:
-                with st.spinner("Analyzing spreadsheet..."):
-                    prompt = f"""
-                    You are an expert data analyst. Answer the user's question based strictly on the provided dataset preview and schema.
+# Sidebar options
+st.sidebar.header("Detection Settings")
+confidence_threshold = st.sidebar.slider(
+    "Confidence Threshold", 
+    min_value=0.05, 
+    max_value=1.0, 
+    value=0.20, 
+    step=0.05
+)
 
-                    Dataset Context (First 50 Rows):
-                    {df.head(50).to_string()}
+# File uploader
+uploaded_file = st.file_uploader("Choose an image...", type=["png", "jpg", "jpeg"])
 
-                    User Question: {user_query}
-                    """
+if uploaded_file is not None:
+    # Read image using PIL
+    image = Image.open(uploaded_file)
+    
+    # Display raw image
+    st.image(image, caption="Uploaded Image", use_container_width=True)
+    st.write("")
+    
+    # Predict button
+    if st.button("Run Detection"):
+        with st.spinner("Processing image..."):
+            # Convert PIL Image to OpenCV format (BGR)
+            img_array = np.array(image.convert("RGB"))
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash", contents=prompt
-                    )
+            # Run YOLOv8 inference
+            results = model.predict(source=img_bgr, conf=confidence_threshold)
+            
+            # Extract annotated frame
+            res_plotted = results[0].plot()
+            res_rgb = cv2.cvtColor(res_plotted, cv2.COLOR_BGR2RGB)
 
-                    st.markdown("### 💡 Answer:")
-                    st.write(response.text)
-        except Exception as e:
-            st.error(f"Error reading CSV file: {e}")
+        st.subheader("Detection Results")
+        st.image(res_rgb, caption="Processed Image", use_container_width=True)
 
-    # ==================== PDF ANALYSIS ====================
-    elif file_extension == "pdf":
-        st.subheader("📑 PDF Document Processing")
-
-        # Write uploaded file to a temporary location for PyPDFLoader
-        temp_file_path = f"temp_{uploaded_file.name}"
-        with open(temp_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        try:
-            # Chunking document
-            loader = PyPDFLoader(temp_file_path)
-            documents = loader.load()
-
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000, chunk_overlap=150
-            )
-            chunks = text_splitter.split_documents(documents)
-
-            st.success(
-                f"Successfully parsed document into {len(chunks)} text chunks."
-            )
-
-            user_query = st.text_input(
-                "Ask a question about your PDF document:"
-            )
-
-            if user_query:
-                with st.spinner("Searching document & generating answer..."):
-                    # Extract top relevant context chunks
-                    document_context = "\n\n".join(
-                        [chunk.page_content for chunk in chunks[:5]]
-                    )
-
-                    prompt = f"""
-                    You are a helpful document assistant. Answer the user's question strictly using the provided context from the PDF document.
-
-                    Document Context:
-                    {document_context}
-
-                    User Question: {user_query}
-                    """
-
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash", contents=prompt
-                    )
-
-                    st.markdown("### 💡 Answer:")
-                    st.write(response.text)
-
-        except Exception as e:
-            st.error(f"Error processing PDF file: {e}")
-
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+        # Show detected counts summary
+        st.subheader("Object Summary")
+        boxes = results[0].boxes
+        if len(boxes) > 0:
+            class_ids = boxes.cls.cpu().numpy().astype(int)
+            class_names = model.names
+            
+            counts = {}
+            for cid in class_ids:
+                cname = class_names[cid]
+                counts[cname] = counts.get(cname, 0) + 1
+            
+            for item, count in counts.items():
+                st.write(f"- **{item.capitalize()}**: {count}")
+        else:
+            st.info("No objects detected above the selected confidence threshold.")
