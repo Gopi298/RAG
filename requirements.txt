@@ -1,6 +1,5 @@
 streamlit
-google-genai
-pandas
-pypdf
-langchain-community
-langchain-text-splitters
+ultralytics
+opencv-python-headless
+pillow
+numpy
