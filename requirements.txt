@@ -1,6 +1,6 @@
 streamlit
-streamlit-webrtc
-tensorflow
+torch
+torchvision
+pillow
 opencv-python-headless
 numpy
-pillow
