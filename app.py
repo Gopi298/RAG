@@ -8,7 +8,7 @@ from PIL import Image
 import cv2
 from huggingface_hub import hf_hub_download
 
-# Page Layout
+# Set page configuration
 st.set_page_config(
     page_title="Accident Detection System",
     page_icon="🚨",
@@ -16,49 +16,60 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------
-# 1. MODEL DOWNLOAD & ARCHITECTURE SETUP
+# 1. HUGGING FACE CONFIGURATION
 # ---------------------------------------------------------
-# CHANGE THESE TWO LINES TO YOUR HUGGINGFACE REPO DETAILS
-HF_REPO_ID = "YOUR_USERNAME/YOUR_MODEL_REPO"  # e.g., "johndoe/accident-resnet"
+# Replace 'username' and 'repo-name' with your actual Hugging Face details
+HF_REPO_ID = "username/repo-name"  
 HF_FILENAME = "data.pkl"
+
+# Optional: Add your HF Read Token here if your repo is PRIVATE (e.g., "hf_xxxxx")
+HF_TOKEN = None 
 
 @st.cache_resource
 def load_accident_model():
-    """Downloads model weights from Hugging Face Hub and constructs PyTorch ResNet-50."""
+    """
+    Downloads model weights from Hugging Face Hub and loads 
+    them into a reconstructed ResNet-50 PyTorch architecture.
+    """
     try:
         with st.spinner("Downloading model weights from Hugging Face..."):
-            model_path = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME)
+            model_path = hf_hub_download(
+                repo_id=HF_REPO_ID, 
+                filename=HF_FILENAME,
+                token=HF_TOKEN
+            )
     except Exception as e:
-        st.error(f"Failed to download model from Hugging Face: {e}")
+        st.error(f"Failed to download model from Hugging Face. Check HF_REPO_ID in app.py: {e}")
         st.stop()
 
     # Reconstruct ResNet-50 architecture matching data.pkl structure
     model = models.resnet50(weights=None)
     
-    # Adjust output layer for binary classification: [0: Normal, 1: Accident]
+    # Adjust final linear layer for 2 classes: [0: Normal, 1: Accident]
     num_ftrs = model.fc.in_features
     model.fc = nn.Linear(num_ftrs, 2)
     
     try:
-        # Load weights onto CPU safely
+        # Safely map tensors to CPU
         state_dict = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
         
-        # Unroll state_dict if wrapped inside a dictionary key
+        # Extract dictionary if wrapped under a root key
         if isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
             
         model.load_state_dict(state_dict)
     except Exception as e:
-        st.error(f"Error loading state dictionary into architecture: {e}")
+        st.error(f"Error loading state dict into ResNet-50 model: {e}")
         st.stop()
         
     model.eval()
     return model
 
+# Initialize Model
 model = load_accident_model()
 
 # ---------------------------------------------------------
-# 2. INFERENCE PREPROCESSING
+# 2. IMAGE PREPROCESSING & INFERENCE
 # ---------------------------------------------------------
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -81,7 +92,7 @@ def predict_frame(image):
     return labels[predicted_class.item()], confidence.item()
 
 # ---------------------------------------------------------
-# 3. STREAMLIT USER INTERFACE
+# 3. STREAMLIT INTERFACE
 # ---------------------------------------------------------
 st.title("🚨 Real-Time Accident Detection App")
 
@@ -119,7 +130,7 @@ with tab2:
         
         cap = cv2.VideoCapture(tfile.name)
         st_frame = st.empty()
-        stop_btn = st.button("Stop Stream")
+        stop_btn = st.button("Stop Processing")
         
         while cap.isOpened() and not stop_btn:
             ret, frame = cap.read()
@@ -131,7 +142,7 @@ with tab2:
             
             label, score = predict_frame(pil_img)
             
-            # Annotate video frame with OpenCV
+            # Annotate frame using OpenCV
             color = (0, 0, 255) if label == "Accident Detected" else (0, 255, 0)
             text = f"{label}: {score * 100:.1f}%"
             cv2.putText(frame, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
