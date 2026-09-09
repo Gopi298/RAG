@@ -3,14 +3,16 @@ import tempfile
 import streamlit as st
 from docx import Document
 from gtts import gTTS
-from moviepy.editor import (
-    AudioFileClip,
-    CompositeVideoClip,
-    ImageClip,
-    TextClip,
-)
 from PIL import Image
 from pypdf import PdfReader
+
+# Updated direct imports for MoviePy 2.0+
+from moviepy import (
+    AudioFileClip,
+    ImageClip,
+    TextClip,
+    concatenate_audioclips,
+)
 
 # Streamlit Page Config
 st.set_page_config(page_title="AI Video Generator", layout="centered")
@@ -86,24 +88,29 @@ if uploaded_file:
                         audio_clip = AudioFileClip(audio_path)
                         duration = audio_clip.duration
 
-                        # 3. Create Video Frame with Text
+                        # 3. Create Video Frame with Text (MoviePy 2.0 syntax)
                         txt_clip = (
                             TextClip(
-                                script,
-                                fontsize=28,
+                                font="Arial",
+                                text=script,
+                                font_size=28,
                                 color=text_color,
                                 size=(1280, 720),
                                 method="caption",
                                 bg_color=bg_color,
                             )
-                            .set_duration(duration)
-                            .set_audio(audio_clip)
+                            .with_duration(duration)
+                            .with_audio(audio_clip)
                         )
 
                         # 4. Write Video File
                         txt_clip.write_videofile(
                             video_path, fps=24, codec="libx264", audio_codec="aac"
                         )
+
+                        # Close clips to free memory
+                        audio_clip.close()
+                        txt_clip.close()
 
                         # Display Result
                         st.video(video_path)
@@ -154,18 +161,16 @@ if uploaded_file:
                     clip2 = AudioFileClip(audio2_path)
 
                     # Stitch dialogues together sequentially
-                    from moviepy.editor import concatenate_audioclips
-
                     full_audio = concatenate_audioclips([clip1, clip2])
                     total_duration = full_audio.duration
 
-                    # Build Video overlaying dialogue on uploaded image
+                    # Build Video overlaying dialogue on uploaded image (MoviePy 2.0 syntax)
                     img_clip = (
                         ImageClip(temp_img_path)
-                        .set_duration(total_duration)
-                        .resize(height=720)
+                        .resized(height=720)
+                        .with_duration(total_duration)
+                        .with_audio(full_audio)
                     )
-                    img_clip = img_clip.set_audio(full_audio)
 
                     img_clip.write_videofile(
                         output_video_path,
@@ -173,6 +178,12 @@ if uploaded_file:
                         codec="libx264",
                         audio_codec="aac",
                     )
+
+                    # Close clips
+                    clip1.close()
+                    clip2.close()
+                    full_audio.close()
+                    img_clip.close()
 
                     st.video(output_video_path)
                     with open(output_video_path, "rb") as file:
