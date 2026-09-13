@@ -1,247 +1,261 @@
-import os
-import re
-import tempfile
 import streamlit as st
-from docx import Document
-from gtts import gTTS
+import torch
+from diffusers import StableDiffusionPipeline
 from PIL import Image
-from pypdf import PdfReader
+import random
+import os
 
-# MoviePy 2.0+ direct imports
-from moviepy import (
-    AudioFileClip,
-    CompositeAudioClip,
-    ImageClip,
-    TextClip,
-    concatenate_audioclips,
-    concatenate_videoclips,
+# --------------------------------------------------
+# PAGE CONFIGURATION
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="AI Text to Image Generator",
+    page_icon="🎨",
+    layout="wide"
 )
 
-st.set_page_config(page_title="AI Context Video Generator", layout="wide")
-st.title("🎥 Long-Form Document & Screenshot Video Generator")
+# --------------------------------------------------
+# TITLE
+# --------------------------------------------------
+
+st.title("🎨 AI Text-to-Image Generator")
 st.write(
-    "Upload your PDF, Word document, TXT file, or Screenshot. "
-    "The app analyzes the context, splits long content into dynamic scenes, and renders a complete narrated video."
+    "Enter a text prompt and generate an AI image using a "
+    "Stable Diffusion model."
 )
 
-# Sidebar settings
-st.sidebar.header("Video Configuration")
-voice_lang = st.sidebar.selectbox("Voice Language", ["en", "es", "fr", "de"])
-bg_color = st.sidebar.color_picker("Background Color", "#0f172a")
-text_color = st.sidebar.color_picker("Text Color", "#ffffff")
-max_chunk_words = st.sidebar.slider(
-    "Words per Scene (Slide)", min_value=20, max_value=100, value=40
+# --------------------------------------------------
+# DEVICE
+# --------------------------------------------------
+
+if torch.cuda.is_available():
+    device = "cuda"
+    st.success("GPU detected - CUDA will be used.")
+else:
+    device = "cpu"
+    st.warning(
+        "GPU not detected. Image generation will use CPU "
+        "and may be slow."
+    )
+
+# --------------------------------------------------
+# MODEL
+# --------------------------------------------------
+
+MODEL_ID = "runwayml/stable-diffusion-v1-5"
+
+# --------------------------------------------------
+# LOAD MODEL
+# --------------------------------------------------
+
+@st.cache_resource
+def load_model():
+
+    dtype = torch.float16 if device == "cuda" else torch.float32
+
+    pipe = StableDiffusionPipeline.from_pretrained(
+        MODEL_ID,
+        torch_dtype=dtype,
+        safety_checker=None
+    )
+
+    pipe = pipe.to(device)
+
+    if device == "cuda":
+        pipe.enable_attention_slicing()
+
+    return pipe
+
+
+# --------------------------------------------------
+# SIDEBAR
+# --------------------------------------------------
+
+st.sidebar.header("⚙️ Generation Settings")
+
+width = st.sidebar.selectbox(
+    "Image Width",
+    [256, 384, 512, 640, 768],
+    index=2
 )
 
-
-def extract_text_from_file(uploaded_file):
-    """Extract full text from PDF, DOCX, or TXT."""
-    file_type = uploaded_file.name.split(".")[-1].lower()
-    text = ""
-
-    if file_type == "pdf":
-        reader = PdfReader(uploaded_file)
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-    elif file_type == "docx":
-        doc = Document(uploaded_file)
-        text = "\n".join([p.text for p in doc.paragraphs if p.text])
-    elif file_type == "txt":
-        text = str(uploaded_file.read(), "utf-8")
-
-    return text.strip()
-
-
-def split_text_into_chunks(text, max_words=40):
-    """Split long text into readable scene chunks based on sentences/word count."""
-    sentences = re.split(r"(?<=[.!?]) +", text.replace("\n", " "))
-    chunks = []
-    current_chunk = []
-    current_count = 0
-
-    for sentence in sentences:
-        words = sentence.split()
-        if not words:
-            continue
-        if current_count + len(words) > max_words and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_count = 0
-        current_chunk.append(sentence)
-        current_count += len(words)
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    return [c for c in chunks if c.strip()]
-
-
-# File Upload Handler
-uploaded_file = st.file_uploader(
-    "Upload File (PDF, DOCX, TXT, PNG, JPG):",
-    type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
+height = st.sidebar.selectbox(
+    "Image Height",
+    [256, 384, 512, 640, 768],
+    index=2
 )
 
-if uploaded_file:
-    file_type = uploaded_file.name.split(".")[-1].lower()
+steps = st.sidebar.slider(
+    "Inference Steps",
+    min_value=10,
+    max_value=100,
+    value=30,
+    step=5
+)
 
-    # --- MODE 1: LONG DOCUMENT ANALYSIS & MULTI-SCENE VIDEO ---
-    if file_type in ["pdf", "docx", "txt"]:
-        st.subheader("📄 Document Context Analysis")
-        raw_text = extract_text_from_file(uploaded_file)
+guidance = st.sidebar.slider(
+    "Guidance Scale",
+    min_value=1.0,
+    max_value=20.0,
+    value=7.5,
+    step=0.5
+)
 
-        if not raw_text:
-            st.error("No text could be extracted from this document.")
-        else:
-            chunks = split_text_into_chunks(raw_text, max_words=max_chunk_words)
-            st.success(
-                f"Document successfully analyzed! Generated {len(chunks)} scene(s) for the video."
-            )
+seed_option = st.sidebar.selectbox(
+    "Seed",
+    [
+        "Random",
+        "Fixed"
+    ]
+)
 
-            # Editable preview of chunks
-            st.markdown("### Preview Scene Segments:")
-            edited_chunks = []
-            for i, chunk in enumerate(chunks):
-                edited_chunks.append(
-                    st.text_area(f"Scene {i+1}", value=chunk, height=80)
+if seed_option == "Fixed":
+
+    seed = st.sidebar.number_input(
+        "Enter Seed",
+        min_value=0,
+        max_value=999999999,
+        value=42
+    )
+
+else:
+
+    seed = random.randint(0, 999999999)
+
+# --------------------------------------------------
+# PROMPT
+# --------------------------------------------------
+
+prompt = st.text_area(
+    "✍️ Enter your prompt",
+    placeholder=(
+        "Example: A futuristic Chennai city at night, "
+        "cinematic lighting, highly detailed, realistic"
+    ),
+    height=120
+)
+
+# --------------------------------------------------
+# NEGATIVE PROMPT
+# --------------------------------------------------
+
+negative_prompt = st.text_area(
+    "🚫 Negative Prompt",
+    value=(
+        "blurry, low quality, distorted, deformed, "
+        "bad anatomy, extra fingers, extra limbs, "
+        "duplicate, watermark, text"
+    ),
+    height=100
+)
+
+# --------------------------------------------------
+# GENERATE BUTTON
+# --------------------------------------------------
+
+generate = st.button(
+    "🎨 Generate Image",
+    type="primary",
+    use_container_width=True
+)
+
+# --------------------------------------------------
+# IMAGE GENERATION
+# --------------------------------------------------
+
+if generate:
+
+    if not prompt.strip():
+
+        st.error("Please enter a text prompt.")
+
+    else:
+
+        try:
+
+            with st.spinner("Generating your image..."):
+
+                pipe = load_model()
+
+                # Create generator
+                generator = torch.Generator(
+                    device=device
+                ).manual_seed(seed)
+
+                # Generate image
+                result = pipe(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator
                 )
 
-            if st.button("🚀 Render Long Document Video"):
-                with st.spinner(
-                    "Generating multi-scene narration & video rendering..."
-                ):
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        video_clips = []
-                        audio_clips = []
+                image = result.images[0]
 
-                        for idx, scene_text in enumerate(edited_chunks):
-                            if not scene_text.strip():
-                                continue
+            # --------------------------------------------------
+            # SAVE IMAGE
+            # --------------------------------------------------
 
-                            # Audio narration for chunk
-                            audio_path = os.path.join(
-                                temp_dir, f"scene_{idx}.mp3"
-                            )
-                            tts = gTTS(
-                                text=scene_text, lang=voice_lang, slow=False
-                            )
-                            tts.save(audio_path)
+            os.makedirs("outputs", exist_ok=True)
 
-                            a_clip = AudioFileClip(audio_path)
-                            scene_duration = a_clip.duration
+            output_file = os.path.join(
+                "outputs",
+                f"generated_{seed}.png"
+            )
 
-                            # Visual slide for chunk
-                            txt_clip = (
-                                TextClip(
-                                    font="Arial",
-                                    text=scene_text,
-                                    font_size=28,
-                                    color=text_color,
-                                    size=(1280, 720),
-                                    method="caption",
-                                    bg_color=bg_color,
-                                )
-                                .with_duration(scene_duration)
-                                .with_audio(a_clip)
-                            )
+            image.save(output_file)
 
-                            video_clips.append(txt_clip)
-                            audio_clips.append(a_clip)
+            # --------------------------------------------------
+            # DISPLAY
+            # --------------------------------------------------
 
-                        if video_clips:
-                            # Concatenate all scene clips into one long video
-                            final_video = concatenate_videoclips(
-                                video_clips, method="compose"
-                            )
-                            output_path = os.path.join(
-                                temp_dir, "long_document_video.mp4"
-                            )
+            st.success("Image generated successfully!")
 
-                            final_video.write_videofile(
-                                output_path,
-                                fps=24,
-                                codec="libx264",
-                                audio_codec="aac",
-                            )
+            st.image(
+                image,
+                caption=f"Generated Image | Seed: {seed}",
+                use_container_width=True
+            )
 
-                            # Close clips to prevent memory leaks
-                            for c in video_clips:
-                                c.close()
-                            for a in audio_clips:
-                                a.close()
+            # --------------------------------------------------
+            # DOWNLOAD
+            # --------------------------------------------------
 
-                            st.video(output_path)
-                            with open(output_path, "rb") as file:
-                                st.download_button(
-                                    label="📥 Download Full Long Video",
-                                    data=file,
-                                    file_name="full_document_video.mp4",
-                                    mime="video/mp4",
-                                )
+            with open(output_file, "rb") as file:
 
-    # --- MODE 2: SCREENSHOT / IMAGE DIALOGUE SCENE ---
-    elif file_type in ["png", "jpg", "jpeg"]:
-        st.subheader("🖼️ Screenshot / Image Character Dialogue")
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded Image", use_container_width=True)
+                st.download_button(
+                    label="⬇️ Download Image",
+                    data=file,
+                    file_name=f"generated_{seed}.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
 
-        col1, col2 = st.split(2) if hasattr(st, "split") else (st, st)
+            # --------------------------------------------------
+            # PROMPT INFORMATION
+            # --------------------------------------------------
 
-        char1_text = st.text_area(
-            "Male / Character 1 Dialogue:",
-            "Based on this document context, here is the first point.",
-        )
-        char2_text = st.text_area(
-            "Female / Character 2 Dialogue:",
-            "Got it! Let us review the remaining key insights.",
-        )
+            with st.expander("🔎 Generation Details"):
 
-        if st.button("🚀 Render Character Dialogue Video"):
-            with st.spinner("Processing image context and dialogues..."):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    audio1_p = os.path.join(temp_dir, "dialogue1.mp3")
-                    audio2_p = os.path.join(temp_dir, "dialogue2.mp3")
-                    img_p = os.path.join(temp_dir, "input_img.png")
-                    output_p = os.path.join(temp_dir, "character_dialogue.mp4")
+                st.write("**Prompt:**")
+                st.write(prompt)
 
-                    image.save(img_p)
+                st.write("**Negative Prompt:**")
+                st.write(negative_prompt)
 
-                    # 1. Voice generation
-                    tts1 = gTTS(text=char1_text, lang=voice_lang)
-                    tts1.save(audio1_p)
-                    tts2 = gTTS(text=char2_text, lang=voice_lang)
-                    tts2.save(audio2_p)
+                st.write("**Width:**", width)
+                st.write("**Height:**", height)
+                st.write("**Steps:**", steps)
+                st.write("**Guidance Scale:**", guidance)
+                st.write("**Seed:**", seed)
+                st.write("**Device:**", device)
 
-                    aud1 = AudioFileClip(audio1_p)
-                    aud2 = AudioFileClip(audio2_p)
+        except Exception as e:
 
-                    # 2. Combine sequential speaker audio
-                    full_dialogue_audio = concatenate_audioclips([aud1, aud2])
+            st.error("Image generation failed.")
 
-                    # 3. Create video using image background
-                    img_clip = (
-                        ImageClip(img_p)
-                        .resized(height=720)
-                        .with_duration(full_dialogue_audio.duration)
-                        .with_audio(full_dialogue_audio)
-                    )
-
-                    img_clip.write_videofile(
-                        output_p, fps=24, codec="libx264", audio_codec="aac"
-                    )
-
-                    aud1.close()
-                    aud2.close()
-                    full_dialogue_audio.close()
-                    img_clip.close()
-
-                    st.video(output_p)
-                    with open(output_p, "rb") as file:
-                        st.download_button(
-                            label="📥 Download Character Video",
-                            data=file,
-                            file_name="character_speech_video.mp4",
-                            mime="video/mp4",
-                        )
+            st.exception(e)
