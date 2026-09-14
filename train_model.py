@@ -1,224 +1,106 @@
 import os
-import json
-import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms, models
 
-# =========================================================
-# SETTINGS
-# =========================================================
-
-DATASET_DIR = "dataset"
-IMG_SIZE = (224, 224)
+# Hyperparameters
 BATCH_SIZE = 16
-SEED = 42
+EPOCHS = 15
+LEARNING_RATE = 0.0005
+MODEL_SAVE_PATH = "accident_detection_mobilenet.pth"
 
-# =========================================================
-# LOAD DATASET
-# =========================================================
+# PyTorch Image Transforms
+data_transforms = {
+    'train': transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ]),
+    'val': transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+}
 
-train_ds = tf.keras.utils.image_dataset_from_directory(
-    DATASET_DIR,
-    validation_split=0.20,
-    subset="training",
-    seed=SEED,
-    image_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    label_mode="binary"
-)
+def train_model():
+    dataset_dir = "dataset"
+    if not os.path.exists(dataset_dir):
+        raise FileNotFoundError("Run prepare_data.py first to create the dataset directory.")
 
-val_ds = tf.keras.utils.image_dataset_from_directory(
-    DATASET_DIR,
-    validation_split=0.20,
-    subset="validation",
-    seed=SEED,
-    image_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    label_mode="binary"
-)
+    full_dataset = datasets.ImageFolder(dataset_dir, transform=data_transforms['train'])
+    
+    # Train / Validation Split (80% / 20%)
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
-class_names = train_ds.class_names
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-print("Classes:", class_names)
+    # Initialize MobileNetV2 Architecture
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
+    
+    # Freeze initial feature extractor layers for better generalization
+    for param in model.parameters():
+        param.requires_grad = False
+        
+    # Replace final classification head for binary classification
+    model.classifier[1] = nn.Linear(model.last_channel, 2)
+    model = model.to(device)
 
-# Save class names
-with open("class_names.json", "w") as f:
-    json.dump(class_names, f)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.classifier.parameters(), lr=LEARNING_RATE)
 
-# =========================================================
-# PERFORMANCE
-# =========================================================
+    print("Starting Training...")
+    best_acc = 0.0
 
-AUTOTUNE = tf.data.AUTOTUNE
+    for epoch in range(EPOCHS):
+        model.train()
+        running_loss, running_corrects = 0.0, 0
 
-train_ds = train_ds.prefetch(AUTOTUNE)
-val_ds = val_ds.prefetch(AUTOTUNE)
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
 
-# =========================================================
-# DATA AUGMENTATION
-# =========================================================
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            loss = criterion(outputs, labels)
 
-data_augmentation = tf.keras.Sequential([
-    layers.RandomFlip("horizontal"),
-    layers.RandomRotation(0.08),
-    layers.RandomZoom(0.15),
-    layers.RandomContrast(0.15),
-    layers.RandomTranslation(0.08, 0.08)
-])
+            loss.backward()
+            optimizer.step()
 
-# =========================================================
-# BASE MODEL
-# =========================================================
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
 
-base_model = MobileNetV2(
-    input_shape=(224, 224, 3),
-    include_top=False,
-    weights="imagenet"
-)
+        epoch_loss = running_loss / train_size
+        epoch_acc = running_corrects.double() / train_size
 
-# Initially freeze pretrained layers
-base_model.trainable = False
+        # Validation loop
+        model.eval()
+        val_corrects = 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+                val_corrects += torch.sum(preds == labels.data)
+        
+        val_acc = val_corrects.double() / val_size
 
-# =========================================================
-# MODEL
-# =========================================================
+        print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f} | Val Acc: {val_acc:.4f}")
 
-inputs = layers.Input(shape=(224, 224, 3))
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-x = data_augmentation(inputs)
+    print(f"Training completed. Best validation accuracy: {best_acc:.4f}. Model saved to {MODEL_SAVE_PATH}")
 
-x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
-
-x = base_model(x, training=False)
-
-x = layers.GlobalAveragePooling2D()(x)
-
-x = layers.BatchNormalization()(x)
-
-x = layers.Dropout(0.35)(x)
-
-x = layers.Dense(
-    128,
-    activation="relu",
-    kernel_regularizer=tf.keras.regularizers.l2(0.001)
-)(x)
-
-x = layers.Dropout(0.30)(x)
-
-outputs = layers.Dense(
-    1,
-    activation="sigmoid"
-)(x)
-
-model = models.Model(inputs, outputs)
-
-# =========================================================
-# COMPILE
-# =========================================================
-
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=0.0005
-    ),
-    loss="binary_crossentropy",
-    metrics=[
-        "accuracy",
-        tf.keras.metrics.Precision(name="precision"),
-        tf.keras.metrics.Recall(name="recall")
-    ]
-)
-
-model.summary()
-
-# =========================================================
-# CALLBACKS
-# =========================================================
-
-callbacks = [
-
-    EarlyStopping(
-        monitor="val_loss",
-        patience=7,
-        restore_best_weights=True
-    ),
-
-    ReduceLROnPlateau(
-        monitor="val_loss",
-        factor=0.3,
-        patience=3,
-        min_lr=0.000001
-    ),
-
-    ModelCheckpoint(
-        "best_accident_model.keras",
-        monitor="val_accuracy",
-        save_best_only=True,
-        verbose=1
-    )
-]
-
-# =========================================================
-# FIRST TRAINING
-# =========================================================
-
-history = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=25,
-    callbacks=callbacks
-)
-
-# =========================================================
-# FINE-TUNING
-# =========================================================
-
-print("\nStarting fine tuning...")
-
-base_model.trainable = True
-
-# Freeze most layers
-for layer in base_model.layers[:-30]:
-    layer.trainable = False
-
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=0.00001
-    ),
-    loss="binary_crossentropy",
-    metrics=[
-        "accuracy",
-        tf.keras.metrics.Precision(name="precision"),
-        tf.keras.metrics.Recall(name="recall")
-    ]
-)
-
-history_fine = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=20,
-    callbacks=callbacks
-)
-
-# =========================================================
-# SAVE FINAL MODEL
-# =========================================================
-
-model.save("accident_model.keras")
-
-print("\n====================================")
-print("MODEL TRAINING COMPLETED")
-print("====================================")
-print("Model saved as: accident_model.keras")
-print("Classes:", class_names)
-
-# =========================================================
-# FINAL EVALUATION
-# =========================================================
-
-results = model.evaluate(val_ds)
-
-print("\nValidation Results:")
-
-for name, value in zip(model.metrics_names, results):
-    print(f"{name}: {value:.4f}")
+if __name__ == "__main__":
+    train_model()
