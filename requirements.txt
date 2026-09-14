@@ -1,6 +1,4 @@
-```text
 streamlit
-tensorflow-cpu
+tensorflow==2.20.0
 numpy
 pillow
-```
