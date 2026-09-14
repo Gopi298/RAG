@@ -1,106 +1,69 @@
-import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, models
+import pandas as pd
+import numpy as np
+import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Hyperparameters
-BATCH_SIZE = 16
-EPOCHS = 15
-LEARNING_RATE = 0.0005
-MODEL_SAVE_PATH = "accident_detection_mobilenet.pth"
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, roc_curve, confusion_matrix
+)
 
-# PyTorch Image Transforms
-data_transforms = {
-    'train': transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ]),
-    'val': transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-}
+# 1. Load Data
+df = pd.read_csv('diabetes.csv')
 
-def train_model():
-    dataset_dir = "dataset"
-    if not os.path.exists(dataset_dir):
-        raise FileNotFoundError("Run prepare_data.py first to create the dataset directory.")
+# 2. Handle Zero Values (Replace invalid 0s with column medians)
+zero_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
+for col in zero_cols:
+    df[col] = df[col].replace(0, np.nan)
+    df[col] = df[col].fillna(df[col].median())
 
-    full_dataset = datasets.ImageFolder(dataset_dir, transform=data_transforms['train'])
-    
-    # Train / Validation Split (80% / 20%)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+# 3. Feature Engineering
+df['BMI_Category'] = pd.cut(df['BMI'], bins=[0, 18.5, 24.9, 29.9, 100], labels=[0, 1, 2, 3]).astype(float)
+df['Glucose_Insulin_Ratio'] = df['Glucose'] / (df['Insulin'] + 1)
+df['Age_BMI_Product'] = df['Age'] * df['BMI']
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+# 4. Features & Target
+X = df.drop('Outcome', axis=1)
+y = df['Outcome']
 
-    # Initialize MobileNetV2 Architecture
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
-    
-    # Freeze initial feature extractor layers for better generalization
-    for param in model.parameters():
-        param.requires_grad = False
-        
-    # Replace final classification head for binary classification
-    model.classifier[1] = nn.Linear(model.last_channel, 2)
-    model = model.to(device)
+# Split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.20, random_state=42, stratify=y
+)
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.classifier.parameters(), lr=LEARNING_RATE)
+# Scaling
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-    print("Starting Training...")
-    best_acc = 0.0
+# 5. Model Training (Optimized Random Forest for maximum stability)
+model = RandomForestClassifier(
+    n_estimators=150,
+    max_depth=5,
+    min_samples_split=4,
+    min_samples_leaf=2,
+    random_state=42
+)
+model.fit(X_train_scaled, y_train)
 
-    for epoch in range(EPOCHS):
-        model.train()
-        running_loss, running_corrects = 0.0, 0
+# Evaluation
+train_preds = model.predict(X_train_scaled)
+test_preds = model.predict(X_test_scaled)
+test_proba = model.predict_proba(X_test_scaled)[:, 1]
 
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
+print(f"Train Accuracy: {accuracy_score(y_train, train_preds)*100:.2f}%")
+print(f"Test Accuracy:  {accuracy_score(y_test, test_preds)*100:.2f}%")
+print(f"ROC AUC Score:  {roc_auc_score(y_test, test_proba):.4f}")
 
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-            loss = criterion(outputs, labels)
+# Save artifacts
+with open('model.pkl', 'wb') as f:
+    pickle.dump(model, f)
 
-            loss.backward()
-            optimizer.step()
+with open('scaler.pkl', 'wb') as f:
+    pickle.dump(scaler, f)
 
-            running_loss += loss.item() * inputs.size(0)
-            running_corrects += torch.sum(preds == labels.data)
-
-        epoch_loss = running_loss / train_size
-        epoch_acc = running_corrects.double() / train_size
-
-        # Validation loop
-        model.eval()
-        val_corrects = 0
-        with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                _, preds = torch.max(outputs, 1)
-                val_corrects += torch.sum(preds == labels.data)
-        
-        val_acc = val_corrects.double() / val_size
-
-        print(f"Epoch {epoch+1}/{EPOCHS} | Train Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f} | Val Acc: {val_acc:.4f}")
-
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save(model.state_dict(), MODEL_SAVE_PATH)
-
-    print(f"Training completed. Best validation accuracy: {best_acc:.4f}. Model saved to {MODEL_SAVE_PATH}")
-
-if __name__ == "__main__":
-    train_model()
+print("Model and Scaler successfully saved!")
