@@ -1,4 +1,7 @@
 streamlit
-tensorflow
-numpy
+torch
+torchvision
 pillow
+albumentations
+opencv-python-headless
+numpy
