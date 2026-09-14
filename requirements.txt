@@ -1,7 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
 streamlit
+https://download.pytorch.org/whl/cpu/torch-2.2.0%2Bcpu-cp310-cp310-linux_x86_64.whl
+https://download.pytorch.org/whl/cpu/torchvision-0.17.0%2Bcpu-cp310-cp310-linux_x86_64.whl
 pillow
 albumentations
 opencv-python-headless
