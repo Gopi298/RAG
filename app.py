@@ -1,160 +1,76 @@
 import streamlit as st
-import tensorflow as tf
-import numpy as np
-import json
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
 from PIL import Image
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
-
+# Page Configuration
 st.set_page_config(
-    page_title="Accident Detection AI",
-    page_icon="🚗",
+    page_title="Accident Detection System",
+    page_icon="🚨",
     layout="centered"
 )
 
-# =========================================================
-# TITLE
-# =========================================================
-
-st.title("🚗 Accident Detection AI")
-
-st.write(
-    "Upload a vehicle/road image and the AI model will "
-    "predict whether an accident is detected."
-)
-
-# =========================================================
-# LOAD MODEL
-# =========================================================
+CLASS_NAMES = ["Accident", "Non-Accident"]
+MODEL_PATH = "accident_detection_mobilenet.pth"
 
 @st.cache_resource
-def load_model():
+def load_trained_model():
+    """Loads and caches the model to optimize Streamlit Cloud performance."""
+    device = torch.device("cpu")
+    model = models.mobilenet_v2(weights=None)
+    model.classifier[1] = nn.Linear(model.last_channel, 2)
+    
+    try:
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        model.eval()
+        return model, True
+    except Exception as e:
+        return model, False
 
-    model = tf.keras.models.load_model(
-        "accident_model.keras"
-    )
+def transform_image(image):
+    """Preprocessing transformation matching training validation set."""
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    return transform(image).unsqueeze(0)
 
-    with open("class_names.json", "r") as f:
-        class_names = json.load(f)
+# Application UI
+st.title("🚨 Real-Time Accident Detection")
+st.write("Upload an image (various angles, weather conditions, objects, or pedestrians) to detect potential road accidents.")
 
-    return model, class_names
+model, model_loaded = load_trained_model()
 
+if not model_loaded:
+    st.warning("⚠️ Weights file (`accident_detection_mobilenet.pth`) not found. Running with uncalibrated baseline weights. Execute `train.py` locally first.")
 
-model, class_names = load_model()
-
-# =========================================================
-# IMAGE UPLOAD
-# =========================================================
-
-uploaded_file = st.file_uploader(
-    "Upload Accident Image",
-    type=["jpg", "jpeg", "png"]
-)
-
-# =========================================================
-# PREDICTION
-# =========================================================
+uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert('RGB')
+    st.image(image, caption="Uploaded Image", use_column_width=True)
+    
+    with st.spinner("Analyzing image features..."):
+        input_tensor = transform_image(image)
+        
+        with torch.no_grad():
+            outputs = model(input_tensor)
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+            
+        accident_prob = probabilities[0].item() * 100
+        non_accident_prob = probabilities[1].item() * 100
+        predicted_class = CLASS_NAMES[torch.argmax(probabilities).item()]
 
-    image = Image.open(uploaded_file).convert("RGB")
-
-    st.image(
-        image,
-        caption="Uploaded Image",
-        use_container_width=True
-    )
-
-    # Resize
-    img = image.resize((224, 224))
-
-    # Convert to array
-    img_array = np.array(img)
-
-    # Add batch dimension
-    img_array = np.expand_dims(
-        img_array,
-        axis=0
-    )
-
-    # MobileNetV2 preprocessing
-    img_array = tf.keras.applications.mobilenet_v2.preprocess_input(
-        img_array.astype(np.float32)
-    )
-
-    # Prediction
-    prediction = model.predict(
-        img_array,
-        verbose=0
-    )[0][0]
-
-    # =====================================================
-    # IMPORTANT
-    # =====================================================
-
-    # Find which class has index 1
-    positive_class = class_names[1]
-
-    if positive_class.lower() == "accident":
-
-        accident_probability = prediction
-
+    st.markdown("---")
+    st.subheader("Analysis Result")
+    
+    if predicted_class == "Accident":
+        st.error(f"**Status: ACCIDENT DETECTED** ({accident_prob:.1f}% Confidence)")
     else:
+        st.success(f"**Status: NO ACCIDENT DETECTED** ({non_accident_prob:.1f}% Confidence)")
 
-        accident_probability = 1 - prediction
-
-    non_accident_probability = 1 - accident_probability
-
-    # =====================================================
-    # RESULT
-    # =====================================================
-
-    st.subheader("Prediction Result")
-
-    if accident_probability >= 0.60:
-
-        st.error("🚨 ACCIDENT DETECTED")
-
-        st.metric(
-            "Accident Probability",
-            f"{accident_probability * 100:.2f}%"
-        )
-
-    else:
-
-        st.success("✅ NO ACCIDENT DETECTED")
-
-        st.metric(
-            "Non-Accident Probability",
-            f"{non_accident_probability * 100:.2f}%"
-        )
-
-    # =====================================================
-    # PROBABILITY BAR
-    # =====================================================
-
-    st.write("Accident Probability")
-
-    st.progress(
-        float(accident_probability)
-    )
-
-    st.write(
-        f"Accident: {accident_probability * 100:.2f}%"
-    )
-
-    st.write(
-        f"Non-Accident: {non_accident_probability * 100:.2f}%"
-    )
-
-    # =====================================================
-    # WARNING
-    # =====================================================
-
-    st.warning(
-        "This is an AI image-classification model. "
-        "It should not be used as the sole basis for "
-        "real-world emergency decisions."
-    )
+    st.write("**Confidence Breakdown:**")
+    st.progress(int(accident_prob), text=f"Accident Risk: {accident_prob:.1f}%")
+    st.progress(int(non_accident_prob), text=f"Safe/Normal: {non_accident_prob:.1f}%")
