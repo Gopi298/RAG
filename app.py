@@ -1,224 +1,160 @@
-import os
-import json
+import streamlit as st
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+import numpy as np
+import json
+from PIL import Image
 
 # =========================================================
-# SETTINGS
+# PAGE CONFIG
 # =========================================================
 
-DATASET_DIR = "dataset"
-IMG_SIZE = (224, 224)
-BATCH_SIZE = 16
-SEED = 42
-
-# =========================================================
-# LOAD DATASET
-# =========================================================
-
-train_ds = tf.keras.utils.image_dataset_from_directory(
-    DATASET_DIR,
-    validation_split=0.20,
-    subset="training",
-    seed=SEED,
-    image_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    label_mode="binary"
+st.set_page_config(
+    page_title="Accident Detection AI",
+    page_icon="🚗",
+    layout="centered"
 )
 
-val_ds = tf.keras.utils.image_dataset_from_directory(
-    DATASET_DIR,
-    validation_split=0.20,
-    subset="validation",
-    seed=SEED,
-    image_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    label_mode="binary"
+# =========================================================
+# TITLE
+# =========================================================
+
+st.title("🚗 Accident Detection AI")
+
+st.write(
+    "Upload a vehicle/road image and the AI model will "
+    "predict whether an accident is detected."
 )
 
-class_names = train_ds.class_names
-
-print("Classes:", class_names)
-
-# Save class names
-with open("class_names.json", "w") as f:
-    json.dump(class_names, f)
-
 # =========================================================
-# PERFORMANCE
+# LOAD MODEL
 # =========================================================
 
-AUTOTUNE = tf.data.AUTOTUNE
+@st.cache_resource
+def load_model():
 
-train_ds = train_ds.prefetch(AUTOTUNE)
-val_ds = val_ds.prefetch(AUTOTUNE)
-
-# =========================================================
-# DATA AUGMENTATION
-# =========================================================
-
-data_augmentation = tf.keras.Sequential([
-    layers.RandomFlip("horizontal"),
-    layers.RandomRotation(0.08),
-    layers.RandomZoom(0.15),
-    layers.RandomContrast(0.15),
-    layers.RandomTranslation(0.08, 0.08)
-])
-
-# =========================================================
-# BASE MODEL
-# =========================================================
-
-base_model = MobileNetV2(
-    input_shape=(224, 224, 3),
-    include_top=False,
-    weights="imagenet"
-)
-
-# Initially freeze pretrained layers
-base_model.trainable = False
-
-# =========================================================
-# MODEL
-# =========================================================
-
-inputs = layers.Input(shape=(224, 224, 3))
-
-x = data_augmentation(inputs)
-
-x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
-
-x = base_model(x, training=False)
-
-x = layers.GlobalAveragePooling2D()(x)
-
-x = layers.BatchNormalization()(x)
-
-x = layers.Dropout(0.35)(x)
-
-x = layers.Dense(
-    128,
-    activation="relu",
-    kernel_regularizer=tf.keras.regularizers.l2(0.001)
-)(x)
-
-x = layers.Dropout(0.30)(x)
-
-outputs = layers.Dense(
-    1,
-    activation="sigmoid"
-)(x)
-
-model = models.Model(inputs, outputs)
-
-# =========================================================
-# COMPILE
-# =========================================================
-
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=0.0005
-    ),
-    loss="binary_crossentropy",
-    metrics=[
-        "accuracy",
-        tf.keras.metrics.Precision(name="precision"),
-        tf.keras.metrics.Recall(name="recall")
-    ]
-)
-
-model.summary()
-
-# =========================================================
-# CALLBACKS
-# =========================================================
-
-callbacks = [
-
-    EarlyStopping(
-        monitor="val_loss",
-        patience=7,
-        restore_best_weights=True
-    ),
-
-    ReduceLROnPlateau(
-        monitor="val_loss",
-        factor=0.3,
-        patience=3,
-        min_lr=0.000001
-    ),
-
-    ModelCheckpoint(
-        "best_accident_model.keras",
-        monitor="val_accuracy",
-        save_best_only=True,
-        verbose=1
+    model = tf.keras.models.load_model(
+        "accident_model.keras"
     )
-]
+
+    with open("class_names.json", "r") as f:
+        class_names = json.load(f)
+
+    return model, class_names
+
+
+model, class_names = load_model()
 
 # =========================================================
-# FIRST TRAINING
+# IMAGE UPLOAD
 # =========================================================
 
-history = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=25,
-    callbacks=callbacks
+uploaded_file = st.file_uploader(
+    "Upload Accident Image",
+    type=["jpg", "jpeg", "png"]
 )
 
 # =========================================================
-# FINE-TUNING
+# PREDICTION
 # =========================================================
 
-print("\nStarting fine tuning...")
+if uploaded_file is not None:
 
-base_model.trainable = True
+    image = Image.open(uploaded_file).convert("RGB")
 
-# Freeze most layers
-for layer in base_model.layers[:-30]:
-    layer.trainable = False
+    st.image(
+        image,
+        caption="Uploaded Image",
+        use_container_width=True
+    )
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=0.00001
-    ),
-    loss="binary_crossentropy",
-    metrics=[
-        "accuracy",
-        tf.keras.metrics.Precision(name="precision"),
-        tf.keras.metrics.Recall(name="recall")
-    ]
-)
+    # Resize
+    img = image.resize((224, 224))
 
-history_fine = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=20,
-    callbacks=callbacks
-)
+    # Convert to array
+    img_array = np.array(img)
 
-# =========================================================
-# SAVE FINAL MODEL
-# =========================================================
+    # Add batch dimension
+    img_array = np.expand_dims(
+        img_array,
+        axis=0
+    )
 
-model.save("accident_model.keras")
+    # MobileNetV2 preprocessing
+    img_array = tf.keras.applications.mobilenet_v2.preprocess_input(
+        img_array.astype(np.float32)
+    )
 
-print("\n====================================")
-print("MODEL TRAINING COMPLETED")
-print("====================================")
-print("Model saved as: accident_model.keras")
-print("Classes:", class_names)
+    # Prediction
+    prediction = model.predict(
+        img_array,
+        verbose=0
+    )[0][0]
 
-# =========================================================
-# FINAL EVALUATION
-# =========================================================
+    # =====================================================
+    # IMPORTANT
+    # =====================================================
 
-results = model.evaluate(val_ds)
+    # Find which class has index 1
+    positive_class = class_names[1]
 
-print("\nValidation Results:")
+    if positive_class.lower() == "accident":
 
-for name, value in zip(model.metrics_names, results):
-    print(f"{name}: {value:.4f}")
+        accident_probability = prediction
+
+    else:
+
+        accident_probability = 1 - prediction
+
+    non_accident_probability = 1 - accident_probability
+
+    # =====================================================
+    # RESULT
+    # =====================================================
+
+    st.subheader("Prediction Result")
+
+    if accident_probability >= 0.60:
+
+        st.error("🚨 ACCIDENT DETECTED")
+
+        st.metric(
+            "Accident Probability",
+            f"{accident_probability * 100:.2f}%"
+        )
+
+    else:
+
+        st.success("✅ NO ACCIDENT DETECTED")
+
+        st.metric(
+            "Non-Accident Probability",
+            f"{non_accident_probability * 100:.2f}%"
+        )
+
+    # =====================================================
+    # PROBABILITY BAR
+    # =====================================================
+
+    st.write("Accident Probability")
+
+    st.progress(
+        float(accident_probability)
+    )
+
+    st.write(
+        f"Accident: {accident_probability * 100:.2f}%"
+    )
+
+    st.write(
+        f"Non-Accident: {non_accident_probability * 100:.2f}%"
+    )
+
+    # =====================================================
+    # WARNING
+    # =====================================================
+
+    st.warning(
+        "This is an AI image-classification model. "
+        "It should not be used as the sole basis for "
+        "real-world emergency decisions."
+    )
