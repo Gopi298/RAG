@@ -1,76 +1,132 @@
 import streamlit as st
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
-from PIL import Image
+import pandas as pd
+import numpy as np
+import pickle
+import plotly.express as px
+import plotly.graph_objects as go
 
-# Page Configuration
+# --- Page Configuration ---
 st.set_page_config(
-    page_title="Accident Detection System",
-    page_icon="🚨",
-    layout="centered"
+    page_title="Diabetes Risk Classifier AI",
+    page_icon="🩺",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-CLASS_NAMES = ["Accident", "Non-Accident"]
-MODEL_PATH = "accident_detection_mobilenet.pth"
+# --- Custom Styling ---
+st.markdown("""
+    <style>
+    .main {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: #f8fafc;
+    }
+    .stMetric {
+        background: #1e293b;
+        border: 1px solid #334155;
+        padding: 15px;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+    .stButton>button {
+        width: 100%;
+        background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
+        color: white;
+        font-weight: bold;
+        border-radius: 8px;
+        border: none;
+        padding: 12px;
+        font-size: 16px;
+    }
+    .stButton>button:hover {
+        background: linear-gradient(90deg, #4f46e5 0%, #9333ea 100%);
+    }
+    </style>
+""", unsafe_allow_html=True)
 
+# --- Load Model & Scaler ---
 @st.cache_resource
-def load_trained_model():
-    """Loads and caches the model to optimize Streamlit Cloud performance."""
-    device = torch.device("cpu")
-    model = models.mobilenet_v2(weights=None)
-    model.classifier[1] = nn.Linear(model.last_channel, 2)
-    
+def load_artifacts():
     try:
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-        model.eval()
-        return model, True
-    except Exception as e:
-        return model, False
+        with open('model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        with open('scaler.pkl', 'rb') as f:
+            scaler = pickle.load(f)
+        return model, scaler
+    except FileNotFoundError:
+        return None, None
 
-def transform_image(image):
-    """Preprocessing transformation matching training validation set."""
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    return transform(image).unsqueeze(0)
+model, scaler = load_artifacts()
 
-# Application UI
-st.title("🚨 Real-Time Accident Detection")
-st.write("Upload an image (various angles, weather conditions, objects, or pedestrians) to detect potential road accidents.")
+# --- Sidebar Inputs ---
+st.sidebar.header("🩺 Patient Clinical Metrics")
 
-model, model_loaded = load_trained_model()
+pregnancies = st.sidebar.number_input("Pregnancies", min_value=0, max_value=20, value=1)
+glucose = st.sidebar.slider("Glucose Level (mg/dL)", 40, 200, 120)
+blood_pressure = st.sidebar.slider("Blood Pressure (mm Hg)", 40, 140, 70)
+skin_thickness = st.sidebar.slider("Skin Thickness (mm)", 7, 99, 20)
+insulin = st.sidebar.slider("Insulin Level (mu U/ml)", 14, 846, 79)
+bmi = st.sidebar.slider("BMI (Body Mass Index)", 15.0, 60.0, 25.0)
+dpf = st.sidebar.slider("Diabetes Pedigree Function", 0.07, 2.5, 0.375)
+age = st.sidebar.slider("Age (Years)", 21, 90, 33)
 
-if not model_loaded:
-    st.warning("⚠️ Weights file (`accident_detection_mobilenet.pth`) not found. Running with uncalibrated baseline weights. Execute `train.py` locally first.")
+# Feature Calculation
+bmi_cat = 0 if bmi < 18.5 else (1 if bmi <= 24.9 else (2 if bmi <= 29.9 else 3))
+gi_ratio = glucose / (insulin + 1)
+age_bmi = age * bmi
 
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+input_data = pd.DataFrame([[
+    pregnancies, glucose, blood_pressure, skin_thickness, insulin, 
+    bmi, dpf, age, bmi_cat, gi_ratio, age_bmi
+]], columns=[
+    'Pregnancies', 'Glucose', 'BloodPressure', 'SkinThickness', 'Insulin',
+    'BMI', 'DiabetesPedigreeFunction', 'Age', 'BMI_Category',
+    'Glucose_Insulin_Ratio', 'Age_BMI_Product'
+])
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-    
-    with st.spinner("Analyzing image features..."):
-        input_tensor = transform_image(image)
-        
-        with torch.no_grad():
-            outputs = model(input_tensor)
-            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+# --- Main Dashboard ---
+st.title("🩺 Diabetes Risk Assessment Platform")
+st.markdown("Interactive machine learning diagnostic tool for diabetes probability analysis.")
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("📋 Patient Summary")
+    st.dataframe(pd.DataFrame({
+        "Metric": ["Glucose", "BMI", "Age", "Insulin", "Blood Pressure"],
+        "Value": [f"{glucose} mg/dL", f"{bmi}", f"{age} yrs", f"{insulin} mu U/ml", f"{blood_pressure} mm Hg"]
+    }), use_container_width=True)
+
+with col2:
+    st.subheader("⚡ Prediction Engine")
+    if model is not None and scaler is not None:
+        scaled_input = scaler.transform(input_data)
+        prediction = model.predict(scaled_input)[0]
+        prob = model.predict_proba(scaled_input)[0][1]
+
+        st.metric(label="Diabetes Risk Probability", value=f"{prob * 100:.1f}%")
+
+        if prediction == 1:
+            st.error("⚠️ **High Risk of Diabetes Detected**")
+        else:
+            st.success("✅ **Low Risk of Diabetes Detected**")
             
-        accident_prob = probabilities[0].item() * 100
-        non_accident_prob = probabilities[1].item() * 100
-        predicted_class = CLASS_NAMES[torch.argmax(probabilities).item()]
-
-    st.markdown("---")
-    st.subheader("Analysis Result")
-    
-    if predicted_class == "Accident":
-        st.error(f"**Status: ACCIDENT DETECTED** ({accident_prob:.1f}% Confidence)")
+        # Gauge Chart
+        fig = go.Figure(go.Indicator(
+            mode = "gauge+number",
+            value = prob * 100,
+            domain = {'x': [0, 1], 'y': [0, 1]},
+            title = {'text': "Risk Score %"},
+            gauge = {
+                'axis': {'range': [0, 100]},
+                'bar': {'color': "#ef4444" if prob >= 0.5 else "#22c55e"},
+                'steps': [
+                    {'range': [0, 35], 'color': "#15803d"},
+                    {'range': [35, 65], 'color': "#eab308"},
+                    {'range': [65, 100], 'color': "#b91c1c"}
+                ]
+            }
+        ))
+        fig.update_layout(height=250, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.success(f"**Status: NO ACCIDENT DETECTED** ({non_accident_prob:.1f}% Confidence)")
-
-    st.write("**Confidence Breakdown:**")
-    st.progress(int(accident_prob), text=f"Accident Risk: {accident_prob:.1f}%")
-    st.progress(int(non_accident_prob), text=f"Safe/Normal: {non_accident_prob:.1f}%")
+        st.warning("Please run `train_and_save.py` first to generate `model.pkl` and `scaler.pkl`.")
