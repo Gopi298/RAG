@@ -1,488 +1,224 @@
-```python
 import os
-import numpy as np
-import streamlit as st
+import json
 import tensorflow as tf
-from PIL import Image
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
-# ============================================================
-# STREAMLIT PAGE
-# ============================================================
-
-st.set_page_config(
-    page_title="AI Accident Detection",
-    page_icon="🚨",
-    layout="wide"
-)
-
-# ============================================================
+# =========================================================
 # SETTINGS
-# ============================================================
+# =========================================================
 
-MODEL_PATH = "models/accident_detection_final.keras"
+DATASET_DIR = "dataset"
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 16
+SEED = 42
 
-IMAGE_SIZE = (224, 224)
+# =========================================================
+# LOAD DATASET
+# =========================================================
 
-# IMPORTANT
-# Training class order:
-#
-# 0 = accident
-# 1 = non_accident
-#
-# Verify this from your Colab:
-# print(train_ds.class_names)
-
-ACCIDENT_THRESHOLD = 0.80
-
-# ============================================================
-# LOAD MODEL
-# ============================================================
-
-@st.cache_resource
-def load_model():
-
-    if not os.path.exists(MODEL_PATH):
-
-        return None
-
-    model = tf.keras.models.load_model(
-        MODEL_PATH
-    )
-
-    return model
-
-
-model = load_model()
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.title("🚨 AI Vehicle Accident Detection")
-
-st.subheader(
-    "Computer Vision + CNN + Streamlit"
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    DATASET_DIR,
+    validation_split=0.20,
+    subset="training",
+    seed=SEED,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    label_mode="binary"
 )
 
-st.write(
-    "Detect vehicle accidents using an AI image "
-    "classification model."
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    DATASET_DIR,
+    validation_split=0.20,
+    subset="validation",
+    seed=SEED,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    label_mode="binary"
 )
 
-# ============================================================
-# MODEL CHECK
-# ============================================================
+class_names = train_ds.class_names
 
-if model is None:
+print("Classes:", class_names)
 
-    st.error(
-        "❌ Model not found."
-    )
+# Save class names
+with open("class_names.json", "w") as f:
+    json.dump(class_names, f)
 
-    st.write(
-        "Please upload your trained model to:"
-    )
+# =========================================================
+# PERFORMANCE
+# =========================================================
 
-    st.code(
-        "models/accident_detection_final.keras"
-    )
+AUTOTUNE = tf.data.AUTOTUNE
 
-    st.stop()
+train_ds = train_ds.prefetch(AUTOTUNE)
+val_ds = val_ds.prefetch(AUTOTUNE)
 
-st.success(
-    "✅ Accident Detection Model Loaded"
+# =========================================================
+# DATA AUGMENTATION
+# =========================================================
+
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.08),
+    layers.RandomZoom(0.15),
+    layers.RandomContrast(0.15),
+    layers.RandomTranslation(0.08, 0.08)
+])
+
+# =========================================================
+# BASE MODEL
+# =========================================================
+
+base_model = MobileNetV2(
+    input_shape=(224, 224, 3),
+    include_top=False,
+    weights="imagenet"
 )
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+# Initially freeze pretrained layers
+base_model.trainable = False
 
-st.sidebar.title("⚙️ Detection Settings")
+# =========================================================
+# MODEL
+# =========================================================
 
-threshold = st.sidebar.slider(
-    "Accident Confidence Threshold",
-    0.50,
-    0.99,
-    0.80,
-    0.01
-)
+inputs = layers.Input(shape=(224, 224, 3))
 
-st.sidebar.write(
-    f"Threshold: {threshold * 100:.0f}%"
-)
+x = data_augmentation(inputs)
 
-st.sidebar.divider()
+x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
 
-st.sidebar.write(
-    "CNN Model: EfficientNetB0"
-)
+x = base_model(x, training=False)
 
-st.sidebar.write(
-    "Input Size: 224 × 224"
-)
+x = layers.GlobalAveragePooling2D()(x)
 
-st.sidebar.write(
-    "Classes: 2"
-)
+x = layers.BatchNormalization()(x)
 
-# ============================================================
-# PREDICTION FUNCTION
-# ============================================================
+x = layers.Dropout(0.35)(x)
 
-def predict_accident(image):
+x = layers.Dense(
+    128,
+    activation="relu",
+    kernel_regularizer=tf.keras.regularizers.l2(0.001)
+)(x)
 
-    # Convert image to RGB
-    image = image.convert("RGB")
+x = layers.Dropout(0.30)(x)
 
-    # Resize
-    image = image.resize(
-        IMAGE_SIZE
-    )
+outputs = layers.Dense(
+    1,
+    activation="sigmoid"
+)(x)
 
-    # Convert to NumPy
-    image_array = np.array(
-        image
-    ).astype(
-        np.float32
-    )
+model = models.Model(inputs, outputs)
 
-    # Add batch dimension
-    image_array = np.expand_dims(
-        image_array,
-        axis=0
-    )
+# =========================================================
+# COMPILE
+# =========================================================
 
-    # Model prediction
-    prediction = model.predict(
-        image_array,
-        verbose=0
-    )
-
-    # --------------------------------------------------------
-    # MODEL OUTPUT
-    # --------------------------------------------------------
-    #
-    # With:
-    #
-    # ['accident', 'non_accident']
-    #
-    # and sigmoid output:
-    #
-    # probability = probability of class 1
-    #
-    # Therefore:
-    #
-    # non_accident = prediction
-    # accident = 1 - prediction
-    #
-
-    non_accident_probability = float(
-        prediction[0][0]
-    )
-
-    accident_probability = (
-        1.0 -
-        non_accident_probability
-    )
-
-    # --------------------------------------------------------
-    # FINAL DECISION
-    # --------------------------------------------------------
-
-    if accident_probability >= threshold:
-
-        result = "ACCIDENT"
-
-        confidence = accident_probability
-
-    else:
-
-        result = "NON-ACCIDENT"
-
-        confidence = non_accident_probability
-
-    return (
-        result,
-        confidence,
-        accident_probability,
-        non_accident_probability
-    )
-
-
-# ============================================================
-# TABS
-# ============================================================
-
-camera_tab, image_tab = st.tabs(
-    [
-        "📷 CAMERA",
-        "🖼️ IMAGE UPLOAD"
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.0005
+    ),
+    loss="binary_crossentropy",
+    metrics=[
+        "accuracy",
+        tf.keras.metrics.Precision(name="precision"),
+        tf.keras.metrics.Recall(name="recall")
     ]
 )
 
-# ============================================================
-# CAMERA TAB
-# ============================================================
+model.summary()
 
-with camera_tab:
+# =========================================================
+# CALLBACKS
+# =========================================================
 
-    st.header(
-        "📷 Camera Accident Detection"
+callbacks = [
+
+    EarlyStopping(
+        monitor="val_loss",
+        patience=7,
+        restore_best_weights=True
+    ),
+
+    ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.3,
+        patience=3,
+        min_lr=0.000001
+    ),
+
+    ModelCheckpoint(
+        "best_accident_model.keras",
+        monitor="val_accuracy",
+        save_best_only=True,
+        verbose=1
     )
+]
 
-    st.write(
-        "Allow camera permission in your browser."
-    )
+# =========================================================
+# FIRST TRAINING
+# =========================================================
 
-    camera_image = st.camera_input(
-        "Take a vehicle picture"
-    )
-
-    if camera_image is not None:
-
-        image = Image.open(
-            camera_image
-        )
-
-        # Display image
-        st.image(
-            image,
-            caption="Camera Image",
-            use_container_width=True
-        )
-
-        # Predict
-        (
-            result,
-            confidence,
-            accident_probability,
-            non_accident_probability
-        ) = predict_accident(
-            image
-        )
-
-        st.divider()
-
-        # ----------------------------------------------------
-        # RESULT
-        # ----------------------------------------------------
-
-        if result == "ACCIDENT":
-
-            st.error(
-                "🚨 ACCIDENT DETECTED"
-            )
-
-        else:
-
-            st.success(
-                "✅ NO ACCIDENT DETECTED"
-            )
-
-        # ----------------------------------------------------
-        # METRICS
-        # ----------------------------------------------------
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.metric(
-                "Prediction",
-                result
-            )
-
-        with col2:
-
-            st.metric(
-                "Confidence",
-                f"{confidence * 100:.2f}%"
-            )
-
-        # ----------------------------------------------------
-        # PROBABILITIES
-        # ----------------------------------------------------
-
-        st.subheader(
-            "Prediction Probability"
-        )
-
-        st.write(
-            f"🚨 Accident: "
-            f"{accident_probability * 100:.2f}%"
-        )
-
-        st.progress(
-            accident_probability
-        )
-
-        st.write(
-            f"✅ Non-Accident: "
-            f"{non_accident_probability * 100:.2f}%"
-        )
-
-        st.progress(
-            non_accident_probability
-        )
-
-# ============================================================
-# IMAGE UPLOAD TAB
-# ============================================================
-
-with image_tab:
-
-    st.header(
-        "🖼️ Upload Vehicle Image"
-    )
-
-    uploaded_file = st.file_uploader(
-        "Choose an image",
-        type=[
-            "jpg",
-            "jpeg",
-            "png",
-            "webp"
-        ]
-    )
-
-    if uploaded_file is not None:
-
-        image = Image.open(
-            uploaded_file
-        )
-
-        st.image(
-            image,
-            caption="Uploaded Vehicle Image",
-            use_container_width=True
-        )
-
-        if st.button(
-            "🔍 DETECT ACCIDENT",
-            type="primary",
-            use_container_width=True
-        ):
-
-            (
-                result,
-                confidence,
-                accident_probability,
-                non_accident_probability
-            ) = predict_accident(
-                image
-            )
-
-            st.divider()
-
-            # ------------------------------------------------
-            # RESULT
-            # ------------------------------------------------
-
-            if result == "ACCIDENT":
-
-                st.error(
-                    "🚨 ACCIDENT DETECTED"
-                )
-
-            else:
-
-                st.success(
-                    "✅ NON-ACCIDENT"
-                )
-
-            # ------------------------------------------------
-            # METRICS
-            # ------------------------------------------------
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                st.metric(
-                    "Prediction",
-                    result
-                )
-
-            with col2:
-
-                st.metric(
-                    "Confidence",
-                    f"{confidence * 100:.2f}%"
-                )
-
-            # ------------------------------------------------
-            # PROBABILITY
-            # ------------------------------------------------
-
-            st.subheader(
-                "AI Prediction"
-            )
-
-            st.write(
-                f"🚨 Accident Probability: "
-                f"{accident_probability * 100:.2f}%"
-            )
-
-            st.progress(
-                accident_probability
-            )
-
-            st.write(
-                f"✅ Non-Accident Probability: "
-                f"{non_accident_probability * 100:.2f}%"
-            )
-
-            st.progress(
-                non_accident_probability
-            )
-
-# ============================================================
-# PROJECT INFORMATION
-# ============================================================
-
-st.divider()
-
-st.header(
-    "🧠 Project Information"
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=25,
+    callbacks=callbacks
 )
 
-col1, col2, col3 = st.columns(3)
+# =========================================================
+# FINE-TUNING
+# =========================================================
 
-with col1:
+print("\nStarting fine tuning...")
 
-    st.write(
-        "**Model**"
-    )
+base_model.trainable = True
 
-    st.write(
-        "EfficientNetB0 CNN"
-    )
+# Freeze most layers
+for layer in base_model.layers[:-30]:
+    layer.trainable = False
 
-with col2:
-
-    st.write(
-        "**Input**"
-    )
-
-    st.write(
-        "224 × 224 pixels"
-    )
-
-with col3:
-
-    st.write(
-        "**Output**"
-    )
-
-    st.write(
-        "Accident / Non-Accident"
-    )
-
-st.info(
-    """
-    This application is an AI classification demonstration.
-    Always verify an accident visually before taking
-    emergency action.
-    """
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.00001
+    ),
+    loss="binary_crossentropy",
+    metrics=[
+        "accuracy",
+        tf.keras.metrics.Precision(name="precision"),
+        tf.keras.metrics.Recall(name="recall")
+    ]
 )
-```
+
+history_fine = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=20,
+    callbacks=callbacks
+)
+
+# =========================================================
+# SAVE FINAL MODEL
+# =========================================================
+
+model.save("accident_model.keras")
+
+print("\n====================================")
+print("MODEL TRAINING COMPLETED")
+print("====================================")
+print("Model saved as: accident_model.keras")
+print("Classes:", class_names)
+
+# =========================================================
+# FINAL EVALUATION
+# =========================================================
+
+results = model.evaluate(val_ds)
+
+print("\nValidation Results:")
+
+for name, value in zip(model.metrics_names, results):
+    print(f"{name}: {value:.4f}")
