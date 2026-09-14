@@ -1,8 +1,6 @@
+```text
 streamlit
-torch
-torchvision
-diffusers
-transformers
-accelerate
-safetensors
-Pillow
+tensorflow-cpu
+numpy
+pillow
+```
