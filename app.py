@@ -1,127 +1,57 @@
 import streamlit as st
-import pandas as pd
+import tensorflow as tf
+from PIL import Image
 import numpy as np
-import pickle
-import plotly.express as px
-import plotly.graph_objects as go
+import os
 
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="Diabetes AI Diagnostic System",
-    page_icon="🩺",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Vehicle Accident Detection", page_icon="🚗", layout="centered")
 
-# --- Custom Styling ---
-st.markdown("""
-    <style>
-    .stApp {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        color: #f8fafc;
-    }
-    .stMetric {
-        background-color: #1e293b;
-        border: 1px solid #334155;
-        padding: 15px;
-        border-radius: 10px;
-    }
-    .stButton>button {
-        background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
-        color: white;
-        font-weight: bold;
-        border-radius: 8px;
-        border: none;
-        padding: 12px;
-    }
-    </style>
-""", unsafe_allow_html=True)
+MODEL_PATH = "models/accident_model.keras"
+IMG_SIZE = (224, 224)
 
-# --- Artifact Loader ---
 @st.cache_resource
-def load_artifacts():
-    try:
-        with open('model.pkl', 'rb') as f_model:
-            model = pickle.load(f_model)
-        with open('scaler.pkl', 'rb') as f_scaler:
-            scaler = pickle.load(f_scaler)
-        return model, scaler
-    except Exception as e:
-        st.error(f"Error loading artifacts: {e}")
-        return None, None
+def load_model():
+    if not os.path.exists(MODEL_PATH):
+        st.error("Model file not found. Please train the model first and place accident_model.keras in the models/ folder.")
+        st.stop()
+    model = tf.keras.models.load_model(MODEL_PATH)
+    return model
 
-model, scaler = load_artifacts()
+model = load_model()
 
-# --- Sidebar Input Controls ---
-st.sidebar.header("🩺 Patient Parameters")
+# Class mapping – adjust if your train_gen showed the opposite
+# Usually: 0 = accident, 1 = non_accident  (check train.py output)
+CLASS_NAMES = {0: "ACCIDENT", 1: "NON-ACCIDENT"}
 
-pregnancies = st.sidebar.number_input("Pregnancies", min_value=0, max_value=20, value=1)
-glucose = st.sidebar.slider("Glucose (mg/dL)", 40, 200, 120)
-blood_pressure = st.sidebar.slider("Blood Pressure (mm Hg)", 40, 140, 70)
-skin_thickness = st.sidebar.slider("Skin Thickness (mm)", 7, 99, 20)
-insulin = st.sidebar.slider("Insulin Level (mu U/ml)", 14, 846, 79)
-bmi = st.sidebar.slider("BMI", 15.0, 60.0, 25.0)
-dpf = st.sidebar.slider("Diabetes Pedigree Function", 0.07, 2.50, 0.375, step=0.01)
-age = st.sidebar.slider("Age (Years)", 21, 90, 33)
+st.title("🚗 Vehicle Accident Detection AI")
+st.markdown("Upload an image of a road scene. The model will classify it as **ACCIDENT** or **NON-ACCIDENT** based on actual collision/impact.")
 
-# Feature Calculations
-bmi_cat = 0 if bmi < 18.5 else (1 if bmi <= 24.9 else (2 if bmi <= 29.9 else 3))
-gi_ratio = glucose / (insulin + 1)
-age_bmi = age * bmi
+uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png", "webp"])
 
-input_data = pd.DataFrame([[
-    pregnancies, glucose, blood_pressure, skin_thickness, insulin, 
-    bmi, dpf, age, bmi_cat, gi_ratio, age_bmi
-]], columns=[
-    'Pregnancies', 'Glucose', 'BloodPressure', 'SkinThickness', 'Insulin',
-    'BMI', 'DiabetesPedigreeFunction', 'Age', 'BMI_Category',
-    'Glucose_Insulin_Ratio', 'Age_BMI_Product'
-])
+if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_container_width=True)
 
-# --- Main Dashboard Layout ---
-st.title("🩺 Diabetes Risk Prediction Platform")
-st.markdown("Clinical Machine Learning Inference Interface")
+    # Preprocess
+    img = image.resize(IMG_SIZE)
+    img_array = np.array(img) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
 
-col_left, col_right = st.columns([1, 1])
+    # Predict
+    with st.spinner("Analyzing..."):
+        pred_prob = model.predict(img_array, verbose=0)[0][0]
+        # Adjust threshold or mapping if needed
+        pred_class = 1 if pred_prob > 0.5 else 0
+        confidence = pred_prob if pred_class == 1 else 1 - pred_prob
 
-with col_left:
-    st.subheader("📋 Input Metrics Summary")
-    st.table(pd.DataFrame({
-        "Metric": ["Glucose", "BMI", "Age", "Insulin", "Blood Pressure", "Pregnancies", "Pedigree Function"],
-        "Value": [f"{glucose} mg/dL", f"{bmi}", f"{age} yrs", f"{insulin} mu U/ml", f"{blood_pressure} mm Hg", str(pregnancies), str(dpf)]
-    }))
+        label = CLASS_NAMES[pred_class]
+        color = "red" if label == "ACCIDENT" else "green"
 
-with col_right:
-    st.subheader("⚡ Diagnostic Result")
-    if model is not None and scaler is not None:
-        scaled_features = scaler.transform(input_data)
-        prediction = model.predict(scaled_features)[0]
-        risk_proba = model.predict_proba(scaled_features)[0][1]
+    st.markdown(f"### Prediction: <span style='color:{color}'>{label}</span>", unsafe_allow_html=True)
+    st.metric("Confidence", f"{confidence*100:.1f}%")
 
-        st.metric(label="Calculated Diabetes Risk", value=f"{risk_proba * 100:.1f}%")
+    st.progress(float(confidence))
 
-        if prediction == 1:
-            st.error("⚠️ **High Probability of Diabetes**")
-        else:
-            st.success("✅ **Low Probability of Diabetes**")
-
-        # Gauge Visualization
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=risk_proba * 100,
-            domain={'x': [0, 1], 'y': [0, 1]},
-            title={'text': "Risk Score Percentage"},
-            gauge={
-                'axis': {'range': [0, 100]},
-                'bar': {'color': "#ef4444" if risk_proba >= 0.5 else "#22c55e"},
-                'steps': [
-                    {'range': [0, 35], 'color': "#15803d"},
-                    {'range': [35, 65], 'color': "#eab308"},
-                    {'range': [65, 100], 'color': "#b91c1c"}
-                ]
-            }
-        ))
-        fig.update_layout(height=260, margin=dict(l=20, r=20, t=30, b=20))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.error("Model artifacts not found. Please run `python train_model.py` first.")
+    with st.expander("Model details"):
+        st.write(f"Raw sigmoid output: {pred_prob:.4f}")
+        st.write("Rules followed: only true collision / impact / visible crash damage is labeled Accident.")
