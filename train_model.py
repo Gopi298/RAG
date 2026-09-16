@@ -1,66 +1,149 @@
-import pandas as pd
+import os
 import numpy as np
-import pickle
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
+import tensorflow as tf
+from tensorflow.keras import layers, models, applications, callbacks
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
 
-# 1. Load Dataset
-df = pd.read_csv('diabetes.csv')
+# ---------------- Config ----------------
+DATA_DIR = "dataset"
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 16
+EPOCHS = 25
+SEED = 42
+MODEL_PATH = "models/accident_model.keras"
 
-# 2. Data Cleaning: Replace zero values in physiological features with medians
-zero_cols = ['Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI']
-for col in zero_cols:
-    df[col] = df[col].replace(0, np.nan)
-    df[col] = df[col].fillna(df[col].median())
+os.makedirs("models", exist_ok=True)
+tf.random.set_seed(SEED)
+np.random.seed(SEED)
 
-# 3. Feature Engineering
-df['BMI_Category'] = pd.cut(df['BMI'], bins=[0, 18.5, 24.9, 29.9, 100], labels=[0, 1, 2, 3]).astype(float)
-df['Glucose_Insulin_Ratio'] = df['Glucose'] / (df['Insulin'] + 1)
-df['Age_BMI_Product'] = df['Age'] * df['BMI']
-
-# 4. Separate Features & Target
-X = df.drop('Outcome', axis=1)
-y = df['Outcome']
-
-# 5. Train / Test Split
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.20, random_state=42, stratify=y
+# ---------------- Data Generators with Augmentation ----------------
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.15,
+    height_shift_range=0.15,
+    shear_range=0.15,
+    zoom_range=0.2,
+    horizontal_flip=True,
+    brightness_range=[0.7, 1.3],
+    fill_mode="nearest",
+    validation_split=0.2          # 20% for validation from the whole set
 )
 
-# 6. Scaling
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
-# 7. Model Training (Optimized Regularized Random Forest)
-model = RandomForestClassifier(
-    n_estimators=150,
-    max_depth=5,
-    min_samples_split=4,
-    min_samples_leaf=2,
-    random_state=42
+# No heavy augmentation for validation/test
+val_datagen = ImageDataGenerator(
+    rescale=1./255,
+    validation_split=0.2
 )
-model.fit(X_train_scaled, y_train)
 
-# 8. Evaluation
-train_preds = model.predict(X_train_scaled)
-test_preds = model.predict(X_test_scaled)
-test_proba = model.predict_proba(X_test_scaled)[:, 1]
+train_gen = train_datagen.flow_from_directory(
+    DATA_DIR,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    subset="training",
+    seed=SEED,
+    shuffle=True
+)
 
-print("--- Training Metrics ---")
-print(f"Train Accuracy: {accuracy_score(y_train, train_preds) * 100:.2f}%")
-print(f"Test Accuracy:  {accuracy_score(y_test, test_preds) * 100:.2f}%")
-print(f"ROC-AUC Score:  {roc_auc_score(y_test, test_proba):.4f}")
-print("\nClassification Report:")
-print(classification_report(y_test, test_preds))
+val_gen = val_datagen.flow_from_directory(
+    DATA_DIR,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode="binary",
+    subset="validation",
+    seed=SEED,
+    shuffle=False
+)
 
-# 9. Save Artifacts
-with open('model.pkl', 'wb') as f:
-    pickle.dump(model, f)
+print("Class indices:", train_gen.class_indices)   # {'accident': 0, 'non_accident': 1} or reverse
 
-with open('scaler.pkl', 'wb') as f:
-    pickle.dump(scaler, f)
+# ---------------- Model (Transfer Learning - EfficientNetB0) ----------------
+base = applications.EfficientNetB0(
+    weights="imagenet",
+    include_top=False,
+    input_shape=(*IMG_SIZE, 3)
+)
+base.trainable = False   # freeze first
 
-print("Saved model.pkl and scaler.pkl successfully!")
+model = models.Sequential([
+    base,
+    layers.GlobalAveragePooling2D(),
+    layers.Dropout(0.4),
+    layers.Dense(128, activation="relu"),
+    layers.Dropout(0.3),
+    layers.Dense(1, activation="sigmoid")
+])
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+    loss="binary_crossentropy",
+    metrics=["accuracy", tf.keras.metrics.Precision(name="precision"),
+             tf.keras.metrics.Recall(name="recall")]
+)
+
+# Callbacks
+early_stop = callbacks.EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
+reduce_lr = callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=3, min_lr=1e-6)
+checkpoint = callbacks.ModelCheckpoint(MODEL_PATH, monitor="val_loss", save_best_only=True)
+
+# ---------------- Train ----------------
+history = model.fit(
+    train_gen,
+    epochs=EPOCHS,
+    validation_data=val_gen,
+    callbacks=[early_stop, reduce_lr, checkpoint]
+)
+
+# Optional fine-tuning (unfreeze top layers)
+base.trainable = True
+for layer in base.layers[:-30]:
+    layer.trainable = False
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    loss="binary_crossentropy",
+    metrics=["accuracy", tf.keras.metrics.Precision(name="precision"),
+             tf.keras.metrics.Recall(name="recall")]
+)
+
+history_fine = model.fit(
+    train_gen,
+    epochs=10,
+    validation_data=val_gen,
+    callbacks=[early_stop, reduce_lr, checkpoint]
+)
+
+# ---------------- Evaluation on validation set ----------------
+val_gen.reset()
+y_true = val_gen.classes
+y_pred_prob = model.predict(val_gen).ravel()
+y_pred = (y_pred_prob > 0.5).astype(int)
+
+print("\n===== Classification Report =====")
+print(classification_report(y_true, y_pred, target_names=list(train_gen.class_indices.keys())))
+
+print("Accuracy :", accuracy_score(y_true, y_pred))
+print("Precision:", precision_score(y_true, y_pred))
+print("Recall   :", recall_score(y_true, y_pred))
+print("F1-score :", f1_score(y_true, y_pred))
+
+cm = confusion_matrix(y_true, y_pred)
+plt.figure(figsize=(6, 5))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=list(train_gen.class_indices.keys()),
+            yticklabels=list(train_gen.class_indices.keys()))
+plt.title("Confusion Matrix")
+plt.ylabel("True")
+plt.xlabel("Predicted")
+plt.tight_layout()
+plt.savefig("models/confusion_matrix.png")
+plt.show()
+
+# Save final model (already saved by checkpoint, but ensure)
+model.save(MODEL_PATH)
+print(f"\nModel saved to {MODEL_PATH}")
