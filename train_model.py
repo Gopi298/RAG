@@ -1,149 +1,99 @@
 import os
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras import layers, models, applications, callbacks
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 import seaborn as sns
-from pathlib import Path
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, f1_score, accuracy_score
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+from tensorflow.keras import layers, models
 
-# ---------------- Config ----------------
-DATA_DIR = "dataset"
-IMG_SIZE = (224, 224)
+# 1. Dataset Loading & Preprocessing
+DATASET_DIR = "dataset"
+IMAGE_SIZE = (224, 224)
 BATCH_SIZE = 16
-EPOCHS = 25
-SEED = 42
-MODEL_PATH = "models/accident_model.keras"
+EPOCHS = 15
 
-os.makedirs("models", exist_ok=True)
-tf.random.set_seed(SEED)
-np.random.seed(SEED)
+images, labels = [], []
+label_map = {"non_accident": 0, "accident": 1}
 
-# ---------------- Data Generators with Augmentation ----------------
-train_datagen = ImageDataGenerator(
-    rescale=1./255,
-    rotation_range=20,
-    width_shift_range=0.15,
-    height_shift_range=0.15,
-    shear_range=0.15,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    brightness_range=[0.7, 1.3],
-    fill_mode="nearest",
-    validation_split=0.2          # 20% for validation from the whole set
-)
+for category, label in label_map.items():
+    folder = os.path.join(DATASET_DIR, category)
+    for filename in os.listdir(folder):
+        if filename.endswith(('.jpg', '.png', '.jpeg')):
+            img_path = os.path.join(folder, filename)
+            img = load_img(img_path, target_size=IMAGE_SIZE)
+            img_array = img_to_array(img)
+            images.append(img_array)
+            labels.append(label)
 
-# No heavy augmentation for validation/test
-val_datagen = ImageDataGenerator(
-    rescale=1./255,
-    validation_split=0.2
-)
+X = np.array(images, dtype="float32")
+X = preprocess_input(X)
+y = np.array(labels)
 
-train_gen = train_datagen.flow_from_directory(
-    DATA_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode="binary",
-    subset="training",
-    seed=SEED,
-    shuffle=True
-)
+# 2. Dataset Splitting (70% Train, 15% Validation, 15% Test)
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.30, random_state=42, stratify=y)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.50, random_state=42, stratify=y_temp)
 
-val_gen = val_datagen.flow_from_directory(
-    DATA_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode="binary",
-    subset="validation",
-    seed=SEED,
-    shuffle=False
-)
+print(f"Dataset Split -> Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
 
-print("Class indices:", train_gen.class_indices)   # {'accident': 0, 'non_accident': 1} or reverse
-
-# ---------------- Model (Transfer Learning - EfficientNetB0) ----------------
-base = applications.EfficientNetB0(
-    weights="imagenet",
-    include_top=False,
-    input_shape=(*IMG_SIZE, 3)
-)
-base.trainable = False   # freeze first
-
-model = models.Sequential([
-    base,
-    layers.GlobalAveragePooling2D(),
-    layers.Dropout(0.4),
-    layers.Dense(128, activation="relu"),
-    layers.Dropout(0.3),
-    layers.Dense(1, activation="sigmoid")
+# 3. Data Augmentation
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.1),
 ])
+
+# 4. Model Architecture (MobileNetV2 Transfer Learning)
+base_model = MobileNetV2(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
+base_model.trainable = False  # Freeze base layers to avoid overfitting
+
+inputs = layers.Input(shape=(224, 224, 3))
+x = data_augmentation(inputs)
+x = base_model(x, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
+outputs = layers.Dense(1, activation="sigmoid")(x)
+
+model = models.Model(inputs, outputs)
 
 model.compile(
     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
     loss="binary_crossentropy",
-    metrics=["accuracy", tf.keras.metrics.Precision(name="precision"),
-             tf.keras.metrics.Recall(name="recall")]
+    metrics=["accuracy"]
 )
 
-# Callbacks
-early_stop = callbacks.EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
-reduce_lr = callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=3, min_lr=1e-6)
-checkpoint = callbacks.ModelCheckpoint(MODEL_PATH, monitor="val_loss", save_best_only=True)
-
-# ---------------- Train ----------------
+# 5. Model Training
 history = model.fit(
-    train_gen,
+    X_train, y_train,
+    validation_data=(X_val, y_val),
     epochs=EPOCHS,
-    validation_data=val_gen,
-    callbacks=[early_stop, reduce_lr, checkpoint]
+    batch_size=BATCH_SIZE
 )
 
-# Optional fine-tuning (unfreeze top layers)
-base.trainable = True
-for layer in base.layers[:-30]:
-    layer.trainable = False
+# 6. Model Evaluation on Unseen Test Set
+y_pred_probs = model.predict(X_test)
+y_pred = (y_pred_probs > 0.5).astype("int32").flatten()
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
-    loss="binary_crossentropy",
-    metrics=["accuracy", tf.keras.metrics.Precision(name="precision"),
-             tf.keras.metrics.Recall(name="recall")]
-)
+acc = accuracy_score(y_test, y_pred)
+prec = precision_score(y_test, y_pred)
+rec = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
 
-history_fine = model.fit(
-    train_gen,
-    epochs=10,
-    validation_data=val_gen,
-    callbacks=[early_stop, reduce_lr, checkpoint]
-)
+print("\n" + "="*40)
+print("       TEST SET EVALUATION METRICS       ")
+print("="*40)
+print(f"Accuracy : {acc:.4f}")
+print(f"Precision: {prec:.4f}")
+print(f"Recall   : {rec:.4f}")
+print(f"F1-Score : {f1:.4f}")
+print("\nClassification Report:\n", classification_report(y_test, y_pred, target_names=["Non-Accident", "Accident"]))
 
-# ---------------- Evaluation on validation set ----------------
-val_gen.reset()
-y_true = val_gen.classes
-y_pred_prob = model.predict(val_gen).ravel()
-y_pred = (y_pred_prob > 0.5).astype(int)
+# Confusion Matrix
+cm = confusion_matrix(y_test, y_pred)
+print("Confusion Matrix:\n", cm)
 
-print("\n===== Classification Report =====")
-print(classification_report(y_true, y_pred, target_names=list(train_gen.class_indices.keys())))
-
-print("Accuracy :", accuracy_score(y_true, y_pred))
-print("Precision:", precision_score(y_true, y_pred))
-print("Recall   :", recall_score(y_true, y_pred))
-print("F1-score :", f1_score(y_true, y_pred))
-
-cm = confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-            xticklabels=list(train_gen.class_indices.keys()),
-            yticklabels=list(train_gen.class_indices.keys()))
-plt.title("Confusion Matrix")
-plt.ylabel("True")
-plt.xlabel("Predicted")
-plt.tight_layout()
-plt.savefig("models/confusion_matrix.png")
-plt.show()
-
-# Save final model (already saved by checkpoint, but ensure)
-model.save(MODEL_PATH)
-print(f"\nModel saved to {MODEL_PATH}")
+# 7. Save Model
+model.save("accident_model.h5")
+print("\nModel saved successfully as 'accident_model.h5'")
