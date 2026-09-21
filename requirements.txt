@@ -1,9 +1,10 @@
 streamlit
 PyPDF2
-langchain
+langchain>=0.3.0,<1.0.0
 langchain-community
 langchain-openai
 langchain-text-splitters
+langchain-core
 faiss-cpu
 openai
 tiktoken
