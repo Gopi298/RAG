@@ -3,8 +3,7 @@ from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.documents import Document
 
 # Get API key from Streamlit secrets
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -38,7 +37,7 @@ if file is not None:
     )
     chunks = text_splitter.split_text(text)
 
-    # Embeddings + Vector store
+    # Create embeddings + vector store
     embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY)
     vector_store = FAISS.from_texts(chunks, embeddings)
 
@@ -47,10 +46,13 @@ if file is not None:
 
     if user_question:
         with st.spinner("Thinking..."):
-            # Retrieve relevant chunks
-            docs = vector_store.similarity_search(user_question)
+            # 1. Retrieve relevant chunks
+            docs = vector_store.similarity_search(user_question, k=4)
 
-            # Modern replacement for load_qa_chain
+            # 2. Build context
+            context = "\n\n".join([doc.page_content for doc in docs])
+
+            # 3. Call the LLM directly (no chains → no Python 3.14 error)
             llm = ChatOpenAI(
                 api_key=OPENAI_API_KEY,
                 temperature=0,
@@ -58,16 +60,15 @@ if file is not None:
                 model="gpt-3.5-turbo"   # or "gpt-4o-mini"
             )
 
-            prompt = ChatPromptTemplate.from_template(
-                """Answer the question based only on the following context:
+            prompt = f"""Answer the question based only on the following context. 
+If the answer is not in the context, say "I don't know based on the provided document."
 
+Context:
 {context}
 
-Question: {input}
-"""
-            )
+Question: {user_question}
 
-            chain = create_stuff_documents_chain(llm, prompt)
-            response = chain.invoke({"context": docs, "input": user_question})
+Answer:"""
 
-            st.write(response)
+            response = llm.invoke(prompt)
+            st.write(response.content)
