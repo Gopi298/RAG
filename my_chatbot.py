@@ -3,9 +3,10 @@ from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
 
-# Get API key from Streamlit secrets (works both locally and on Streamlit Cloud)
+# Get API key from Streamlit secrets
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="My PDF Chatbot", page_icon="📄")
@@ -46,16 +47,27 @@ if file is not None:
 
     if user_question:
         with st.spinner("Thinking..."):
-            match = vector_store.similarity_search(user_question)
+            # Retrieve relevant chunks
+            docs = vector_store.similarity_search(user_question)
 
+            # Modern replacement for load_qa_chain
             llm = ChatOpenAI(
                 api_key=OPENAI_API_KEY,
                 temperature=0,
                 max_tokens=1000,
-                model="gpt-3.5-turbo"   # or "gpt-4o-mini" for better quality/cheaper
+                model="gpt-3.5-turbo"   # or "gpt-4o-mini"
             )
 
-            chain = load_qa_chain(llm, chain_type="stuff")
-            response = chain.run(input_documents=match, question=user_question)
+            prompt = ChatPromptTemplate.from_template(
+                """Answer the question based only on the following context:
+
+{context}
+
+Question: {input}
+"""
+            )
+
+            chain = create_stuff_documents_chain(llm, prompt)
+            response = chain.invoke({"context": docs, "input": user_question})
 
             st.write(response)
