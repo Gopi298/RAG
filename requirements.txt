@@ -5,5 +5,5 @@ langchain-community
 langchain-text-splitters
 langchain-core
 faiss-cpu
-openai
-tiktoken
+sentence-transformers
+torch
